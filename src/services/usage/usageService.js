@@ -91,7 +91,8 @@ class UsageService {
         session_id: session.id || session.session_id,
         created_at: session.created_at,
         total_tokens: session.total_tokens || 0,
-        message_count: session.message_count || 0,
+        total_messages: session.message_count || session.total_messages || 0,
+        message_count: session.message_count || session.total_messages || 0,
         cost: session.cost || 0
       }));
     } catch (error) {
@@ -102,16 +103,89 @@ class UsageService {
 
   /**
    * Get agent API calls with trend data
-   * TODO: Backend needs API calls endpoint
    */
   async getAgentApiCalls(agentId, options = {}) {
-    // For now, return empty data structure
-    // Backend doesn't have dedicated API calls endpoint yet
-    return {
-      total_calls: 0,
-      calls_by_date: [],
-      monthly_breakdown: []
-    };
+    try {
+      const dataAccess = getDataAccess();
+      const data = await dataAccess.getAgentAnalytics(agentId);
+
+      if (!data) {
+        return {
+          total_calls: 0,
+          calls_by_date: [],
+          monthly_breakdown: [],
+          trendData: {
+            daily: []
+          },
+          monthlySummary: {
+            total_tokens: 0,
+            total_cost: 0
+          }
+        };
+      }
+
+      // Transform analytics data to trend data format
+      const { selectedMonth } = options;
+      const dailyBreakdown = data.daily_breakdown || [];
+
+      // Filter by selected month if provided
+      let filteredDaily = dailyBreakdown;
+      if (selectedMonth) {
+        const [year, month] = selectedMonth.split('-').map(Number);
+        filteredDaily = dailyBreakdown.filter(day => {
+          const date = new Date(day.date);
+          return date.getFullYear() === year && date.getMonth() + 1 === month;
+        });
+      }
+
+      // Calculate monthly summary from filtered data
+      // If no filter or filtered data is empty, use aggregate totals from API
+      let monthlySummary;
+      if (filteredDaily.length > 0) {
+        monthlySummary = filteredDaily.reduce((acc, day) => ({
+          total_tokens: acc.total_tokens + (day.total_tokens || 0),
+          total_cost: acc.total_cost + (day.cost || 0)
+        }), { total_tokens: 0, total_cost: 0 });
+      } else {
+        // Use aggregate totals if no daily data or month filter doesn't match
+        monthlySummary = {
+          total_tokens: data.total_tokens || 0,
+          total_cost: data.cost || 0
+        };
+      }
+
+      return {
+        total_calls: data.total_sessions || 0,
+        calls_by_date: filteredDaily,
+        monthly_breakdown: filteredDaily,
+        trendData: {
+          daily: filteredDaily.map(day => ({
+            date: day.date,
+            total_tokens: day.total_tokens || 0,
+            prompt_tokens: 0, // Not available in daily breakdown
+            completion_tokens: 0, // Not available in daily breakdown
+            cost: day.cost || 0,
+            api_calls: day.sessions || 0,
+            messages: day.messages || 0
+          }))
+        },
+        monthlySummary
+      };
+    } catch (error) {
+      console.error('Error getting agent API calls:', error);
+      return {
+        total_calls: 0,
+        calls_by_date: [],
+        monthly_breakdown: [],
+        trendData: {
+          daily: []
+        },
+        monthlySummary: {
+          total_tokens: 0,
+          total_cost: 0
+        }
+      };
+    }
   }
 
   /**

@@ -17,6 +17,7 @@ const backendConfig = isDevelopment
 
 // Get API base URLs from bundled config
 const API_BASE_URL = backendConfig.AGENT_BUILDER_AI_SERVICE_URL;
+const ANALYTICS_API_URL = backendConfig.ANALYTICS_SERVICE_URL;
 const AGENT_BRIDGE_URL = backendConfig.AGENT_BRIDGE_URL;
 
 // Helper to get organization API key (matches pattern from apiConfig.js)
@@ -26,7 +27,7 @@ const getOrganizationApiKey = () => {
 
 class ApiDataAccess {
   constructor() {
-    // Create axios instance with interceptors
+    // Create axios instance for main API operations
     this.api = axios.create({
       baseURL: API_BASE_URL,
       headers: {
@@ -34,27 +35,38 @@ class ApiDataAccess {
       }
     });
 
-    // Add organization API key to all requests
-    this.api.interceptors.request.use(async (config) => {
-      const apiKey = getOrganizationApiKey();
-
-      if (apiKey) {
-        config.headers.Authorization = `ApiKey ${apiKey}`;
-      } else {
-        console.warn('⚠️ API Key not set - requests will fail');
+    // Create dedicated axios instance for analytics operations
+    this.analyticsApi = axios.create({
+      baseURL: ANALYTICS_API_URL,
+      headers: {
+        'Content-Type': 'application/json'
       }
-
-      return config;
     });
 
-    // Handle errors consistently
-    this.api.interceptors.response.use(
-      (response) => response,
-      (error) => {
-        console.error('API Error:', error.response?.data || error.message);
-        throw error;
-      }
-    );
+    // Apply interceptors to both API instances
+    [this.api, this.analyticsApi].forEach(instance => {
+      // Add organization API key to all requests
+      instance.interceptors.request.use(async (config) => {
+        const apiKey = getOrganizationApiKey();
+
+        if (apiKey) {
+          config.headers.Authorization = `ApiKey ${apiKey}`;
+        } else {
+          console.warn('⚠️ API Key not set - requests will fail');
+        }
+
+        return config;
+      });
+
+      // Handle errors consistently
+      instance.interceptors.response.use(
+        (response) => response,
+        (error) => {
+          console.error('API Error:', error.response?.data || error.message);
+          throw error;
+        }
+      );
+    });
   }
 
   // ============================================================================
@@ -540,19 +552,19 @@ class ApiDataAccess {
   // ============================================================================
 
   async getAgentAnalytics(agentId) {
-    const response = await this.api.get(`/api/analytics/agents/${agentId}`);
+    const response = await this.analyticsApi.get(`/api/analytics/agents/${agentId}`);
     return response.data.data || null;
   }
 
   async getAgentSessions(agentId, limit = 50, offset = 0) {
     const params = { limit, offset };
-    const response = await this.api.get(`/api/analytics/agents/${agentId}/sessions`, { params });
+    const response = await this.analyticsApi.get(`/api/analytics/agents/${agentId}/sessions`, { params });
     return response.data.data || [];
   }
 
   async getDashboardMetrics(agentId, days = 7) {
     const params = { days };
-    const response = await this.api.get(`/api/analytics/agents/${agentId}/dashboard`, { params });
+    const response = await this.analyticsApi.get(`/api/analytics/agents/${agentId}/dashboard`, { params });
     return response.data.data || null;
   }
 
