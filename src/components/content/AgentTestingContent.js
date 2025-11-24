@@ -37,7 +37,6 @@ import {
 import { getDataAccess } from '../../services/data/DataAccessFactory';
 import apiKeyService from '../../services/apiKeys/apiKeyService';
 import EmptyState from '../shared/EmptyState';
-import { getProjectOrganizationId } from '../../utils/projectHelpers';
 import { checkDeploymentStatus } from '../../services/publishing/publishingService';
 import AgentTestingSidebar from '../AgentEditor/AgentTesting/AgentTestingSidebar';
 
@@ -121,7 +120,7 @@ const AgentTestingContent = ({ agentId }) => {
     };
 
     loadAgentAndDeploymentStatus();
-  }, [agentId]);
+  }, [agentId, currentUser?.uid]);
 
   const loadTestSessions = React.useCallback(async () => {
     try {
