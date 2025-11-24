@@ -1,6 +1,6 @@
 {
   "name": "@olbrain/alchemist-dashboard",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Embeddable AI Agent Dashboard with Module Federation support",
   "keywords": [
     "react",
