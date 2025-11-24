@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Test Embeddable Dashboard</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* Simulated Sinch Header */
+    header {
+      padding: 1rem 2rem;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    }
+
+    header h1 {
+      font-size: 1.5rem;
+      font-weight: 600;
+    }
+
+    header .user-info {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .container {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    /* Simulated Sinch Sidebar */
+    aside {
+      width: 240px;
+      padding: 1.5rem 1rem;
+      background: #2d3748;
+      color: white;
+      overflow-y: auto;
+    }
+
+    aside h3 {
+      font-size: 0.875rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #a0aec0;
+      margin-bottom: 1rem;
+    }
+
+    aside ul {
+      list-style: none;
+      padding: 0;
+    }
+
+    aside li {
+      padding: 0.75rem 1rem;
+      margin-bottom: 0.25rem;
+      cursor: pointer;
+      border-radius: 6px;
+      transition: all 0.2s;
+      font-size: 0.95rem;
+    }
+
+    aside li:hover {
+      background: #4a5568;
+    }
+
+    aside li.active {
+      background: #667eea;
+      font-weight: 500;
+    }
+
+    /* Dashboard Container */
+    main {
+      flex: 1;
+      overflow: auto;
+      background: #f7fafc;
+    }
+
+    #dashboard-root {
+      width: 100%;
+      height: 100%;
+    }
+
+    .loading {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      height: 100%;
+      color: #4a5568;
+    }
+
+    .loading-spinner {
+      width: 48px;
+      height: 48px;
+      border: 4px solid #e2e8f0;
+      border-top-color: #667eea;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin-bottom: 1rem;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .error {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      height: 100%;
+      color: #e53e3e;
+      padding: 2rem;
+    }
+
+    .error h2 {
+      margin-bottom: 0.5rem;
+    }
+
+    .error-details {
+      background: #fff5f5;
+      border: 1px solid #feb2b2;
+      border-radius: 8px;
+      padding: 1rem;
+      margin-top: 1rem;
+      max-width: 600px;
+      font-family: monospace;
+      font-size: 0.875rem;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .test-mode-banner {
+      background: #fef5e7;
+      color: #7d6608;
+      padding: 0.5rem 1rem;
+      text-align: center;
+      font-size: 0.875rem;
+      border-bottom: 1px solid #f9e79f;
+    }
+  </style>
+</head>
+<body>
+  <!-- Test Mode Banner -->
+  <div class="test-mode-banner">
+    Test Mode: This is a simulated platform layout embedding the dashboard
+  </div>
+
+  <!-- Simulated Sinch Platform Header -->
+  <header>
+    <h1>Sinch Communications Platform</h1>
+    <div class="user-info">
+      <span>👤 test@sinch.com</span>
+    </div>
+  </header>
+
+  <div class="container">
+    <!-- Simulated Sinch Sidebar -->
+    <aside>
+      <h3>Navigation</h3>
+      <ul>
+        <li>📊 Dashboard</li>
+        <li>💬 Messages</li>
+        <li class="active">🤖 AI Agents</li>
+        <li>📞 Voice & Video</li>
+        <li>👥 Contacts</li>
+        <li>📈 Analytics</li>
+        <li>⚙️ Settings</li>
+      </ul>
+    </aside>
+
+    <!-- Embedded Dashboard -->
+    <main>
+      <div id="dashboard-root">
+        <div class="loading">
+          <div class="loading-spinner"></div>
+          <p>Loading AI Agent Dashboard...</p>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Load React and ReactDOM from CDN -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+  <!-- Minimal Dashboard Configuration -->
+  <script>
+    // REQUIRED: Set organization credentials BEFORE loading the dashboard
+    // These are the ONLY external configuration values needed
+    window.REACT_APP_ORGANIZATION_ID = 'org_WtKXt019_1761567432675';
+    window.REACT_APP_ORGANIZATION_API_KEY = 'org_live_f64e86660dff9562350d22edfdd07faf1717fc5dee7215bceddfb1e924f54288';
+    //window.REACT_APP_ORGANIZATION_API_KEY = 'org_live_f64e86660dff9562350d22edfdd07faf1717fc5dee7215bceddfb1e924f5';
+
+    // Optional: Set environment (defaults to 'production')
+    // Controls which backend URLs are used from bundled configuration
+    window.REACT_APP_ENV = 'development';
+
+    // REQUIRED: User context information
+    const user = {
+      uid: 'WtKXt019p9XMOQLyi8MAZFXTDRY2',
+      email: 'nishant@olbrain.com',
+      displayName: 'Nishant Singh',
+      organizationId: 'org_WtKXt019_1761567432675'
+    };
+
+    // Load and initialize dashboard
+    async function loadDashboard() {
+      try {
+        // Load the remote entry script
+        const script = document.createElement('script');
+        script.src = './build/remoteEntry.js';
+        script.async = true;
+
+        script.onerror = () => {
+          showError('Failed to load dashboard', 'Make sure you have run "npm run build:dev" first.');
+        };
+
+        script.onload = async () => {
+          try {
+            // Initialize Module Federation container
+            if (!window.projectDashboard) {
+              throw new Error('Dashboard module not found');
+            }
+
+            await window.projectDashboard.init({
+              react: {
+                '18.2.0': {
+                  get: () => Promise.resolve(() => window.React),
+                  loaded: 1
+                }
+              },
+              'react-dom': {
+                '18.2.0': {
+                  get: () => Promise.resolve(() => window.ReactDOM),
+                  loaded: 1
+                }
+              }
+            });
+
+            // Load dashboard components
+            const DashboardProviderModule = await window.projectDashboard.get('./DashboardProvider');
+            const DashboardProvider = DashboardProviderModule().DashboardProvider;
+
+            const DashboardCoreModule = await window.projectDashboard.get('./DashboardCore');
+            const DashboardCore = DashboardCoreModule().default;
+
+            // Render dashboard
+            // Configure dashboard dimensions (optional - defaults to 100% width/height)
+            // Available options:
+            //   - Percentage: '100%', '80%'
+            //   - Pixels: '1200px', '800px'
+            //   - Viewport units: '80vw', '80vh'
+            //   - Auto: 'auto' (fits content)
+            const dashboard = React.createElement(
+              DashboardProvider,
+              {
+                user: user,
+                onAuthError: (error) => console.error('Auth error:', error)
+              },
+              React.createElement(DashboardCore, {
+                initialPath: '/',
+                // width: '1200px',  // Uncomment to set custom width
+                // height: '800px',  // Uncomment to set custom height
+              })
+            );
+
+            const container = document.getElementById('dashboard-root');
+            const root = ReactDOM.createRoot(container);
+            root.render(dashboard);
+
+          } catch (error) {
+            showError('Failed to initialize dashboard', error.message);
+          }
+        };
+
+        document.head.appendChild(script);
+
+      } catch (error) {
+        showError('Failed to load dashboard', error.message);
+      }
+    }
+
+    function showError(title, details) {
+      const container = document.getElementById('dashboard-root');
+      container.innerHTML = `
+        <div class="error">
+          <h2>${title}</h2>
+          <p>Check the browser console for more details</p>
+          <div class="error-details">${details || 'Unknown error'}</div>
+        </div>
+      `;
+    }
+
+    // Start loading when page is ready
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', loadDashboard);
+    } else {
+      loadDashboard();
+    }
+  </script>
+</body>
+</html>

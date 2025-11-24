@@ -1,0 +1,323 @@
+/**
+ * Tool Configuration Service
+ *
+ * Manages agent-specific configurations for public tools
+ * Stores configurations in agents/{agent_id}/tool_configs/{tool_id} subcollection
+ */
+import {
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  query,
+  where
+} from 'firebase/firestore';
+import { db } from '../../utils/firebase';
+import { agentBuilderApi } from '../config/apiConfig';
+import { getCurrentUser } from '../context';
+import { fetchAndCacheToolMetadata, removeCachedToolMetadata } from './toolMetadataService';
+
+/**
+ * Save or update tool configuration for an agent
+ * @param {string} agentId - Agent ID
+ * @param {string} toolId - Tool ID (public tool)
+ * @param {Object} configData - Configuration data
+ * @returns {Promise<Object>} Saved configuration
+ */
+export const saveToolConfiguration = async (agentId, toolId, configData) => {
+  try {
+    const currentUser = getCurrentUser();
+    if (!currentUser) {
+      throw new Error('User not authenticated');
+    }
+
+    const {
+      configuration,
+      enabled = true,
+      enabled_subtools = []
+    } = configData;
+
+    // Validate required fields
+    if (!configuration || typeof configuration !== 'object') {
+      throw new Error('Configuration object is required');
+    }
+
+    // Use backend API to save tool configuration
+    await agentBuilderApi.post('/api/tools/configurations', {
+      agent_id: agentId,
+      tool_id: toolId,
+      enabled,
+      configuration,
+      custom_parameters: {
+        enabled_subtools
+      }
+    });
+
+    console.log('Saved tool configuration via backend API:', { agentId, toolId });
+
+    // Auto-enable required tools
+    const autoEnabled = await autoEnableRequiredTools(agentId, toolId);
+
+    // Cache tool metadata if enabled
+    if (enabled) {
+      try {
+        await fetchAndCacheToolMetadata(agentId, toolId);
+        console.log(`Cached metadata for enabled tool: ${toolId}`);
+      } catch (error) {
+        console.error(`Failed to cache metadata for ${toolId}:`, error);
+        // Don't fail the save operation if metadata caching fails
+      }
+    }
+
+    return {
+      id: toolId,
+      enabled,
+      configuration,
+      enabled_subtools,
+      auto_enabled_tools: autoEnabled
+    };
+  } catch (error) {
+    console.error('Error saving tool configuration:', error);
+    throw error;
+  }
+};
+
+/**
+ * Auto-enable required tools when a tool with dependencies is configured
+ * @param {string} agentId - Agent ID
+ * @param {string} toolId - Tool ID that was just configured
+ * @returns {Promise<Array>} Array of tool IDs that were auto-enabled
+ */
+const autoEnableRequiredTools = async (agentId, toolId) => {
+  try {
+    // Load tool definition to check for required_tools field
+    const toolRef = doc(db, 'tools', toolId);
+    const toolDoc = await getDoc(toolRef);
+
+    if (!toolDoc.exists()) {
+      console.log('Tool not found for auto-enable check:', toolId);
+      return [];
+    }
+
+    const toolData = toolDoc.data();
+    const requiredTools = toolData.required_tools || [];
+
+    if (requiredTools.length === 0) {
+      return [];
+    }
+
+    console.log(`Tool ${toolId} requires: ${requiredTools.join(', ')}`);
+
+    const autoEnabledTools = [];
+
+    for (const requiredToolId of requiredTools) {
+      try {
+        // Check if required tool is already configured
+        const existing = await getToolConfiguration(agentId, requiredToolId);
+
+        if (!existing) {
+          // Auto-enable required tool with empty configuration
+          console.log(`Auto-enabling required tool: ${requiredToolId}`);
+          await saveToolConfiguration(agentId, requiredToolId, {
+            configuration: {},
+            enabled: true,
+            enabled_subtools: []
+          });
+          autoEnabledTools.push(requiredToolId);
+        } else {
+          console.log(`Required tool ${requiredToolId} already configured, skipping auto-enable`);
+        }
+      } catch (error) {
+        console.error(`Error auto-enabling required tool ${requiredToolId}:`, error);
+        // Continue with other required tools even if one fails
+      }
+    }
+
+    if (autoEnabledTools.length > 0) {
+      console.log(`Auto-enabled ${autoEnabledTools.length} required tools:`, autoEnabledTools);
+    }
+
+    return autoEnabledTools;
+  } catch (error) {
+    console.error('Error in autoEnableRequiredTools:', error);
+    return [];
+  }
+};
+
+/**
+ * Get tool configuration for an agent
+ * @param {string} agentId - Agent ID
+ * @param {string} toolId - Tool ID
+ * @returns {Promise<Object|null>} Configuration or null if not found
+ */
+export const getToolConfiguration = async (agentId, toolId) => {
+  try {
+    const configRef = doc(db, 'agents', agentId, 'tool_configs', toolId);
+    const configDoc = await getDoc(configRef);
+
+    if (!configDoc.exists()) {
+      console.log('Tool configuration not found:', { agentId, toolId });
+      return null;
+    }
+
+    return {
+      id: configDoc.id,
+      ...configDoc.data()
+    };
+  } catch (error) {
+    console.error('Error getting tool configuration:', error);
+    throw error;
+  }
+};
+
+/**
+ * Get all enabled tool configurations for an agent
+ * @param {string} agentId - Agent ID
+ * @returns {Promise<Array>} Array of enabled tool configurations
+ */
+export const getEnabledToolConfigs = async (agentId) => {
+  try {
+    const configsRef = collection(db, 'agents', agentId, 'tool_configs');
+    const q = query(configsRef, where('enabled', '==', true));
+
+    const querySnapshot = await getDocs(q);
+    const configs = [];
+
+    querySnapshot.forEach((doc) => {
+      configs.push({
+        id: doc.id,
+        ...doc.data()
+      });
+    });
+
+    console.log(`Found ${configs.length} enabled tool configurations for agent ${agentId}`);
+    return configs;
+  } catch (error) {
+    console.error('Error getting enabled tool configurations:', error);
+    throw error;
+  }
+};
+
+/**
+ * Get all tool configurations for an agent (enabled and disabled)
+ * @param {string} agentId - Agent ID
+ * @returns {Promise<Array>} Array of all tool configurations
+ */
+export const getAllToolConfigs = async (agentId) => {
+  try {
+    const configsRef = collection(db, 'agents', agentId, 'tool_configs');
+    const querySnapshot = await getDocs(configsRef);
+    const configs = [];
+
+    querySnapshot.forEach((doc) => {
+      configs.push({
+        id: doc.id,
+        ...doc.data()
+      });
+    });
+
+    console.log(`Found ${configs.length} tool configurations for agent ${agentId}`);
+    return configs;
+  } catch (error) {
+    console.error('Error getting all tool configurations:', error);
+    throw error;
+  }
+};
+
+/**
+ * Delete tool configuration for an agent
+ * @param {string} agentId - Agent ID
+ * @param {string} toolId - Tool ID
+ * @returns {Promise<void>}
+ */
+export const deleteToolConfiguration = async (agentId, toolId) => {
+  try {
+    const currentUser = getCurrentUser();
+    if (!currentUser) {
+      throw new Error('User not authenticated');
+    }
+
+    // Use backend API to delete tool configuration
+    await agentBuilderApi.delete(`/api/tools/configurations/${agentId}/${toolId}`);
+    console.log('Deleted tool configuration via backend API:', { agentId, toolId });
+  } catch (error) {
+    console.error('Error deleting tool configuration:', error);
+    throw error;
+  }
+};
+
+/**
+ * Enable/disable a tool configuration
+ * @param {string} agentId - Agent ID
+ * @param {string} toolId - Tool ID
+ * @param {boolean} enabled - Whether to enable or disable
+ * @returns {Promise<void>}
+ */
+export const toggleToolConfiguration = async (agentId, toolId, enabled) => {
+  try {
+    const currentUser = getCurrentUser();
+    if (!currentUser) {
+      throw new Error('User not authenticated');
+    }
+
+    // Use backend API to toggle tool configuration
+    await agentBuilderApi.patch('/api/tools/configurations/toggle', {
+      agent_id: agentId,
+      tool_id: toolId,
+      enabled
+    });
+
+    console.log(`${enabled ? 'Enabled' : 'Disabled'} tool configuration via backend API:`, { agentId, toolId });
+
+    // Cache or remove metadata based on enabled status
+    if (enabled) {
+      try {
+        await fetchAndCacheToolMetadata(agentId, toolId);
+        console.log(`Cached metadata for enabled tool: ${toolId}`);
+      } catch (error) {
+        console.error(`Failed to cache metadata for ${toolId}:`, error);
+        // Don't fail the toggle operation if metadata caching fails
+      }
+    } else {
+      try {
+        await removeCachedToolMetadata(agentId, toolId);
+        console.log(`Removed cached metadata for disabled tool: ${toolId}`);
+      } catch (error) {
+        console.error(`Failed to remove cached metadata for ${toolId}:`, error);
+        // Don't fail the toggle operation if metadata removal fails
+      }
+    }
+  } catch (error) {
+    console.error('Error toggling tool configuration:', error);
+    throw error;
+  }
+};
+
+/**
+ * Check if a tool is configured and enabled for an agent
+ * @param {string} agentId - Agent ID
+ * @param {string} toolId - Tool ID
+ * @returns {Promise<boolean>} True if configured and enabled
+ */
+export const isToolConfigured = async (agentId, toolId) => {
+  try {
+    const config = await getToolConfiguration(agentId, toolId);
+    return config !== null && config.enabled === true;
+  } catch (error) {
+    console.error('Error checking tool configuration:', error);
+    return false;
+  }
+};
+
+// Export all functions as default object
+const toolConfigurationService = {
+  saveToolConfiguration,
+  getToolConfiguration,
+  getEnabledToolConfigs,
+  getAllToolConfigs,
+  deleteToolConfiguration,
+  toggleToolConfiguration,
+  isToolConfigured
+};
+
+export default toolConfigurationService;

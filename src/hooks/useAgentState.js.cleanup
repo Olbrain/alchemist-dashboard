@@ -1,0 +1,121 @@
+/**
+ * useAgentState Hook
+ * 
+ * Custom hook for managing agent state and related operations
+ */
+import { useState, useEffect, useRef } from 'react';
+import { useParams } from 'react-router-dom';
+import { useAuth } from '../utils/AuthContext';
+// import { onSnapshot, doc } from 'firebase/firestore'; // REMOVED: Firebase/Firestore
+import { db } from '../utils/firebase';
+
+// FIRESTORE STUBS - These functions are stubbed because Firestore is disabled
+const collection = (...args) => { console.warn('Firestore disabled: collection() called'); return null; };
+const doc = (...args) => { console.warn('Firestore disabled: doc() called'); return null; };
+const getDoc = async (...args) => { console.warn('Firestore disabled: getDoc() called'); return { exists: () => false, data: () => ({}) }; };
+const getDocs = async (...args) => { console.warn('Firestore disabled: getDocs() called'); return { docs: [], size: 0, forEach: () => {} }; };
+const query = (...args) => { console.warn('Firestore disabled: query() called'); return null; };
+const where = (...args) => { console.warn('Firestore disabled: where() called'); return null; };
+const orderBy = (...args) => { console.warn('Firestore disabled: orderBy() called'); return null; };
+const limit = (...args) => { console.warn('Firestore disabled: limit() called'); return null; };
+const onSnapshot = (...args) => { console.warn('Firestore disabled: onSnapshot() called'); const callback = args.find(a => typeof a === 'function'); if (callback) setTimeout(() => callback({ docs: [], size: 0, forEach: () => {} }), 0); return () => {}; };
+
+
+export const useAgentState = (providedAgentId = null) => {
+  const { agentId: routeAgentId } = useParams();
+  const agentId = providedAgentId || routeAgentId;
+  const { currentUser } = useAuth();
+  const [agent, setAgent] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+  const unsubscribeRef = useRef(null);
+
+  // Load agent data from Firestore
+  useEffect(() => {
+    if (!currentUser || !agentId) {
+      setLoading(false);
+      return;
+    }
+
+    console.log(`Setting up Firestore listener for agent ${agentId}`);
+    setLoading(true);
+    setError('');
+
+    try {
+      const agentRef = doc(db, 'agents', agentId);
+      
+      unsubscribeRef.current = onSnapshot(
+        agentRef,
+        (docSnapshot) => {
+          console.log('Agent document snapshot received');
+          
+          if (docSnapshot.exists()) {
+            const agentData = { id: docSnapshot.id, ...docSnapshot.data() };
+            console.log('Agent data loaded:', agentData);
+            setAgent(agentData);
+            setError('');
+          } else {
+            console.warn('Agent document does not exist');
+            setAgent(null);
+            setError('Agent not found');
+          }
+          
+          setLoading(false);
+        },
+        (err) => {
+          console.error('Error listening to agent document:', err);
+          setError('Failed to load agent data');
+          setLoading(false);
+        }
+      );
+    } catch (err) {
+      console.error('Error setting up agent listener:', err);
+      setError('Failed to initialize agent data');
+      setLoading(false);
+    }
+
+    // Cleanup function
+    return () => {
+      if (unsubscribeRef.current) {
+        console.log('Cleaning up Firestore listener');
+        unsubscribeRef.current();
+        unsubscribeRef.current = null;
+      }
+    };
+  }, [currentUser, agentId]);
+
+  // Update agent data locally (optimistic updates)
+  const updateAgentLocal = (updates) => {
+    setAgent(prevAgent => prevAgent ? { ...prevAgent, ...updates } : null);
+  };
+
+  // Set saving state
+  const setSavingState = (isSaving) => {
+    setSaving(isSaving);
+  };
+
+  // Set error state
+  const setErrorState = (errorMessage) => {
+    setError(errorMessage);
+  };
+
+  // Clear error
+  const clearError = () => {
+    setError('');
+  };
+
+  return {
+    agent,
+    agentId,
+    loading,
+    error,
+    saving,
+    updateAgentLocal,
+    setSaving: setSavingState,
+    setError: setErrorState,
+    clearError
+  };
+};
+
+export default useAgentState;

@@ -1,0 +1,448 @@
+/**
+ * MCP Service
+ *
+ * Handles all MCP server related operations:
+ * - Configuration management
+ * - Testing MCP server connections
+ * - Saving/loading configurations via backend API
+ * - Reading configurations from Firestore for real-time updates
+ */
+
+import { db } from '../../utils/firebase';
+// import { doc, getDoc, getDocs, deleteDoc, collection } from 'firebase/firestore'; // REMOVED: Firebase/Firestore
+import { getAuthToken } from '../auth/authService';
+import { AGENT_ENGINE_URL, TOOL_MANAGER_URL } from '../config/apiConfig';
+import { Collections } from '../../constants/collections';
+import { agentBuilderApi } from '../api/agentBuilderApiClient';
+import axios from 'axios';
+
+// FIRESTORE STUBS - These functions are stubbed because Firestore is disabled
+const collection = (...args) => { console.warn('Firestore disabled: collection() called'); return null; };
+const doc = (...args) => { console.warn('Firestore disabled: doc() called'); return null; };
+const getDoc = async (...args) => { console.warn('Firestore disabled: getDoc() called'); return { exists: () => false, data: () => ({}) }; };
+const getDocs = async (...args) => { console.warn('Firestore disabled: getDocs() called'); return { docs: [], size: 0, forEach: () => {} }; };
+const query = (...args) => { console.warn('Firestore disabled: query() called'); return null; };
+const where = (...args) => { console.warn('Firestore disabled: where() called'); return null; };
+const orderBy = (...args) => { console.warn('Firestore disabled: orderBy() called'); return null; };
+const limit = (...args) => { console.warn('Firestore disabled: limit() called'); return null; };
+const onSnapshot = (...args) => { console.warn('Firestore disabled: onSnapshot() called'); const callback = args.find(a => typeof a === 'function'); if (callback) setTimeout(() => callback({ docs: [], size: 0, forEach: () => {} }), 0); return () => {}; };
+const deleteDoc = async (...args) => { console.warn('Firestore disabled: deleteDoc() called'); };
+
+
+/**
+ * Get all MCP configurations for an agent
+ */
+export const getAgentMcpConfigurations = async (agentId) => {
+  try {
+    const configsRef = collection(db, 'agents', agentId, 'tool_configs');
+    const querySnapshot = await getDocs(configsRef);
+
+    const configs = {};
+    querySnapshot.forEach((doc) => {
+      // Only include MCP configs (ID starts with 'mcp_')
+      if (doc.id.startsWith('mcp_')) {
+        configs[doc.id.replace('mcp_', '')] = {
+          id: doc.id,
+          ...doc.data()
+        };
+      }
+    });
+
+    return configs;
+  } catch (error) {
+    console.error('Error getting MCP configurations:', error);
+    throw error;
+  }
+};
+
+/**
+ * Save MCP configuration via backend API
+ */
+export const saveMcpConfiguration = async (agentId, serverId, configData, isPrivate = false) => {
+  try {
+    const response = await agentBuilderApi.saveMcpConfiguration(agentId, {
+      server_name: serverId,
+      config: configData,
+      enabled: true,
+      is_private: isPrivate
+    });
+
+    return response;
+  } catch (error) {
+    console.error('Error saving MCP configuration:', error);
+    throw error;
+  }
+};
+
+/**
+ * Get a specific MCP configuration
+ */
+export const getMcpConfiguration = async (agentId, serverId) => {
+  try {
+    const configRef = doc(db, 'agents', agentId, 'tool_configs', `mcp_${serverId}`);
+    const configDoc = await getDoc(configRef);
+
+    if (configDoc.exists()) {
+      return {
+        id: configDoc.id,
+        ...configDoc.data()
+      };
+    }
+
+    return null;
+  } catch (error) {
+    console.error('Error getting MCP configuration:', error);
+    throw error;
+  }
+};
+
+/**
+ * Delete MCP configuration (legacy - Firestore only)
+ * This manages the tool_configs collection which is separate from the new backend API
+ */
+export const deleteMcpConfiguration = async (agentId, serverId) => {
+  try {
+    const configRef = doc(db, 'agents', agentId, 'tool_configs', `mcp_${serverId}`);
+    await deleteDoc(configRef);
+  } catch (error) {
+    console.error('Error deleting MCP configuration:', error);
+    throw error;
+  }
+};
+
+/**
+ * Test MCP server configuration
+ * Calls backend to start MCP server, connect client, and test tools
+ */
+export const testMcpConfiguration = async (agentId, serverId, configData, serverDefinition) => {
+  try {
+    const token = await getAuthToken();
+
+    const response = await axios.post(
+      `${AGENT_ENGINE_URL}/api/agents/${agentId}/test-mcp-config`,
+      {
+        server_id: serverId,
+        configuration: configData,
+        server_definition: {
+          installation: serverDefinition.installation,
+          name: serverDefinition.name
+        }
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 30000 // 30 second timeout
+      }
+    );
+
+    return response.data;
+  } catch (error) {
+    console.error('Error testing MCP configuration:', error);
+
+    if (error.response) {
+      // Backend returned an error
+      throw new Error(error.response.data.error || 'Failed to test MCP configuration');
+    } else if (error.request) {
+      // Request made but no response
+      throw new Error('No response from server. Please try again.');
+    } else {
+      // Error setting up request
+      throw new Error(error.message || 'Failed to test MCP configuration');
+    }
+  }
+};
+
+/**
+ * Toggle MCP configuration enabled/disabled via backend API
+ */
+export const toggleMcpConfiguration = async (agentId, configId, enabled) => {
+  try {
+    const response = await agentBuilderApi.toggleMcpConfiguration(agentId, configId, enabled);
+    return response;
+  } catch (error) {
+    console.error('Error toggling MCP configuration:', error);
+    throw error;
+  }
+};
+
+/**
+ * Save an API tool for an agent via backend API
+ */
+export const saveApiTool = async (agentId, toolData) => {
+  try {
+    const response = await agentBuilderApi.saveMcpTool(agentId, {
+      name: toolData.name,
+      path: toolData.path || toolData.endpoint,
+      method: toolData.method || 'GET',
+      authentication: toolData.authentication,
+      credentials: toolData.credentials,
+      parameters: toolData.parameters || [],
+      description: toolData.description
+    });
+
+    return response;
+  } catch (error) {
+    console.error('Error saving API tool:', error);
+    throw error;
+  }
+};
+
+/**
+ * Save a private MCP server definition for an agent via backend API
+ */
+export const savePrivateMcpServer = async (agentId, serverData) => {
+  try {
+    const response = await agentBuilderApi.savePrivateMcpServer(agentId, {
+      server_name: serverData.name || serverData.server_name,
+      url: serverData.url,
+      authentication: serverData.authentication,
+      description: serverData.description,
+      enabled: serverData.enabled !== false,
+      is_private: serverData.is_private !== false
+    });
+
+    return response;
+  } catch (error) {
+    console.error('Error saving private MCP server:', error);
+    throw error;
+  }
+};
+
+/**
+ * Get all API tools for an agent
+ */
+export const getApiTools = async (agentId) => {
+  try {
+    console.log('getApiTools called with agentId:', agentId);
+    const apiToolsRef = collection(db, 'agents', agentId, 'api_tools');
+    console.log('Querying collection path:', `agents/${agentId}/api_tools`);
+    const querySnapshot = await getDocs(apiToolsRef);
+
+    const tools = [];
+    querySnapshot.forEach((doc) => {
+      tools.push({
+        id: doc.id,
+        ...doc.data()
+      });
+    });
+
+    console.log('getApiTools returning:', tools);
+    return tools;
+  } catch (error) {
+    console.error('ERROR in getApiTools:', {
+      code: error.code,
+      message: error.message,
+      agentId,
+      fullError: error
+    });
+    throw error;
+  }
+};
+
+/**
+ * Get all private MCP servers for an agent
+ */
+export const getPrivateMcpServers = async (agentId) => {
+  try {
+    const serversRef = collection(db, 'agents', agentId, 'private_mcp_servers');
+    const querySnapshot = await getDocs(serversRef);
+
+    const servers = [];
+    querySnapshot.forEach((doc) => {
+      const data = doc.data();
+      // Filter out API tools - they should be in api_tools collection
+      if (data.type !== 'api_tool') {
+        servers.push({
+          id: doc.id,
+          ...data
+        });
+      }
+    });
+
+    return servers;
+  } catch (error) {
+    console.error('Error getting private MCP servers:', error);
+    throw error;
+  }
+};
+
+/**
+ * Delete an API tool via backend API
+ */
+export const deleteApiTool = async (agentId, toolId) => {
+  try {
+    const response = await agentBuilderApi.deleteMcpTool(agentId, toolId);
+    return response;
+  } catch (error) {
+    console.error('Error deleting API tool:', error);
+    throw error;
+  }
+};
+
+/**
+ * Delete a private MCP server definition via backend API
+ */
+export const deletePrivateMcpServer = async (agentId, serverId) => {
+  try {
+    const response = await agentBuilderApi.deletePrivateMcpServer(agentId, serverId);
+    return response;
+  } catch (error) {
+    console.error('Error deleting private MCP server:', error);
+    throw error;
+  }
+};
+
+/**
+ * Test an already-enabled MCP server
+ * Convenience function that loads the server definition and config, then tests
+ */
+export const testEnabledMcpServer = async (agentId, serverId, serverDefinition) => {
+  try {
+    // Get the configuration
+    const config = await getMcpConfiguration(agentId, serverId);
+
+    if (!config || !config.configuration) {
+      throw new Error('Server configuration not found');
+    }
+
+    // Test using the existing test function
+    return await testMcpConfiguration(
+      agentId,
+      serverId,
+      config.configuration,
+      serverDefinition
+    );
+  } catch (error) {
+    console.error('Error testing enabled MCP server:', error);
+    throw error;
+  }
+};
+
+/**
+ * Test API endpoints with credentials
+ * Used by API-to-MCP wizard to validate endpoints before creating MCP server
+ */
+export const testApiEndpoints = async (agentId, testConfig) => {
+  try {
+    const token = await getAuthToken();
+
+    const response = await axios.post(
+      `${AGENT_ENGINE_URL}/api/agents/${agentId}/test-api-endpoints`,
+      testConfig,
+      {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 60000 // 60 second timeout for testing multiple endpoints
+      }
+    );
+
+    return response.data;
+  } catch (error) {
+    console.error('Error testing API endpoints:', error);
+
+    if (error.response) {
+      throw new Error(error.response.data.error || 'Failed to test API endpoints');
+    } else if (error.request) {
+      throw new Error('No response from server. Please try again.');
+    } else {
+      throw new Error(error.message || 'Failed to test API endpoints');
+    }
+  }
+};
+
+/**
+ * Get available MCP servers from Firestore public_mcp_servers collection
+ * Merged with private servers for the agent
+ */
+export const getAvailableMcpServers = async (agentId = null) => {
+  try {
+    // Fetch public MCP servers directly from Firestore
+    const publicServersRef = collection(db, Collections.PUBLIC_MCP_SERVERS);
+    const publicSnapshot = await getDocs(publicServersRef);
+
+    const publicServers = [];
+    publicSnapshot.forEach((doc) => {
+      publicServers.push({
+        id: doc.id,
+        ...doc.data()
+      });
+    });
+
+    // If agentId provided, merge with private servers
+    if (agentId) {
+      try {
+        const privateServers = await getPrivateMcpServers(agentId);
+        // Merge arrays, private servers come after public ones
+        return [...publicServers, ...privateServers];
+      } catch (privateError) {
+        console.error('Error loading private servers:', privateError);
+        // Return just public servers if private servers fail to load
+        return publicServers;
+      }
+    }
+
+    return publicServers;
+  } catch (error) {
+    console.error('Error fetching MCP servers:', error);
+
+    // If we have an agentId, try to return just private servers
+    if (agentId) {
+      try {
+        const privateServers = await getPrivateMcpServers(agentId);
+        return privateServers;
+      } catch (privateError) {
+        // Both failed, throw error
+      }
+    }
+
+    // Return empty array on error - UI will handle gracefully
+    throw new Error(error.message || 'Failed to fetch MCP servers from Firestore');
+  }
+};
+
+/**
+ * Generate private MCP server config from API tools
+ */
+export const generatePrivateMcpConfig = async (agentId) => {
+  try {
+    const token = await getAuthToken();
+
+    const response = await axios.post(
+      `${TOOL_MANAGER_URL}/api/v1/agents/${agentId}/private-mcp-config/generate`,
+      {},
+      {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    return response.data;
+  } catch (error) {
+    console.error('Error generating private MCP config:', error);
+    throw new Error(error.response?.data?.detail || 'Failed to generate MCP configuration');
+  }
+};
+
+const McpService = {
+  getAgentMcpConfigurations,
+  saveMcpConfiguration,
+  getMcpConfiguration,
+  deleteMcpConfiguration,
+  testMcpConfiguration,
+  toggleMcpConfiguration,
+  getAvailableMcpServers,
+  savePrivateMcpServer,
+  getPrivateMcpServers,
+  deletePrivateMcpServer,
+  testEnabledMcpServer,
+  testApiEndpoints,
+  generatePrivateMcpConfig
+};
+
+export default McpService;

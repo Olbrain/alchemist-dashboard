@@ -1,0 +1,922 @@
+/**
+ * Agent Testing Content Component
+ *
+ * Main component for the Agent Testing tab in MainContainer dashboard
+ * Allows users to select deployed agents, create test sessions, and conduct live testing
+ */
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  Box,
+  Typography,
+  Button,
+  TextField,
+  IconButton,
+  Alert,
+  CircularProgress,
+  Stack,
+  Paper,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions
+} from '@mui/material';
+import {
+  Science as ScienceIcon,
+  Send as SendIcon,
+  SmartToy as BotIcon,
+  Person as PersonIcon,
+  Token as TokenIcon,
+  AttachMoney as AttachMoneyIcon
+} from '@mui/icons-material';
+import { useAuth } from '../../utils/AuthContext';
+import testingService from '../../services/testing/testingService';
+import {
+  getSessionMessagesFromFirestore,
+  subscribeToSessionMessages
+} from '../../services/conversations/conversationService';
+import { db } from '../../utils/firebase';
+// import { doc, getDoc, onSnapshot } from 'firebase/firestore'; // REMOVED: Firebase/Firestore
+import apiKeyService from '../../services/apiKeys/apiKeyService';
+import EmptyState from '../shared/EmptyState';
+import { getProjectOrganizationId } from '../../utils/projectHelpers';
+import { checkDeploymentStatus } from '../../services/publishing/publishingService';
+import AgentTestingSidebar from '../AgentEditor/AgentTesting/AgentTestingSidebar';
+
+const AgentTestingContent = ({ agentId }) => {
+  const { currentUser } = useAuth();
+
+  // Track organization_id fetched from agent's project
+  const [organizationId, setOrganizationId] = useState(null);
+
+  // State management
+  const [selectedAgent, setSelectedAgent] = useState(null);
+  const [testSessions, setTestSessions] = useState([]);
+  const [selectedTestSession, setSelectedTestSession] = useState(null);
+  const [isDeployed, setIsDeployed] = useState(false);
+
+  // Loading states
+  const [loadingDeploymentStatus, setLoadingDeploymentStatus] = useState(true);
+  const [loadingSessions, setLoadingSessions] = useState(false);
+  const [isCreatingSession, setIsCreatingSession] = useState(false);
+
+  // Chat state
+  const [messages, setMessages] = useState([]);
+  const [currentMessage, setCurrentMessage] = useState('');
+  const [isSending, setIsSending] = useState(false);
+  const [sessionId, setSessionId] = useState(null);
+  const [sessionStats, setSessionStats] = useState(null);
+
+  // API Key state
+  const [testApiKey, setTestApiKey] = useState(null);
+
+  // Dialog states
+  const [newSessionDialogOpen, setNewSessionDialogOpen] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [sessionToDelete, setSessionToDelete] = useState(null);
+  const [newSessionTitle, setNewSessionTitle] = useState('');
+  const [newSessionDescription, setNewSessionDescription] = useState('');
+
+  // Refs
+  const agentEndpointRef = useRef(null);
+  const subscriptionRefs = useRef({ message: null, stats: null });
+
+  // Check deployment status and load agent data (simplified approach like Publish tab)
+  useEffect(() => {
+    const loadAgentAndDeploymentStatus = async () => {
+      if (!agentId) {
+        setLoadingDeploymentStatus(false);
+        return;
+      }
+
+      try {
+        setLoadingDeploymentStatus(true);
+        console.log('🧪 [AgentTestingContent] Checking deployment status for agentId:', agentId);
+
+        // Check deployment status using the same method as Publish tab
+        const deploymentExists = await checkDeploymentStatus(agentId);
+        setIsDeployed(deploymentExists);
+        console.log('🧪 [AgentTestingContent] Deployment status:', deploymentExists);
+
+        // Load agent data
+        const agentDoc = await getDoc(doc(db, 'agents', agentId));
+        if (agentDoc.exists()) {
+          const agentData = agentDoc.data();
+          setSelectedAgent({
+            id: agentId,
+            name: agentData.name || 'Unnamed Agent',
+            description: agentData.description || '',
+            agent_type: agentData.agent_type || 'general',
+            model: agentData.model || 'unknown',
+            project_id: agentData.project_id,
+            created_at: agentData.created_at
+          });
+
+          // Get organizationId for loading sessions later
+          if (agentData.project_id) {
+            const orgId = await getProjectOrganizationId(agentData.project_id);
+            setOrganizationId(orgId);
+          }
+        } else {
+          console.error('🧪 [AgentTestingContent] Agent document not found:', agentId);
+          setSelectedAgent(null);
+        }
+      } catch (error) {
+        console.error('🧪 [AgentTestingContent] Error loading agent/deployment status:', error);
+        setIsDeployed(false);
+        setSelectedAgent(null);
+      } finally {
+        setLoadingDeploymentStatus(false);
+      }
+    };
+
+    loadAgentAndDeploymentStatus();
+  }, [agentId]);
+
+  const loadTestSessions = React.useCallback(async () => {
+    try {
+      // Add safety checks
+      if (!selectedAgent) {
+        console.warn('🧪 [loadTestSessions] No agent selected, skipping load');
+        setTestSessions([]);
+        return;
+      }
+
+      if (!organizationId) {
+        console.warn('🧪 [loadTestSessions] Organization ID not available, skipping load');
+        setTestSessions([]);
+        return;
+      }
+
+      setLoadingSessions(true);
+      console.log('🧪 [loadTestSessions] Fetching sessions with parameters:', {
+        agentId: selectedAgent.id,
+        organizationId: organizationId,
+        limitCount: 50
+      });
+
+      // Fetch testing sessions from agent_sessions with mode='testing'
+      const sessions = await testingService.getTestingSessions(
+        selectedAgent.id,
+        organizationId,
+        { limitCount: 50 }
+      );
+
+      console.log('🧪 [loadTestSessions] Successfully loaded sessions:', {
+        count: sessions.length,
+        sessions: sessions.map(s => ({ id: s.id, title: s.title, created_at: s.created_at }))
+      });
+
+      setTestSessions(sessions);
+    } catch (error) {
+      console.error('🧪 [loadTestSessions] Error loading test sessions:', error);
+      setTestSessions([]);
+    } finally {
+      setLoadingSessions(false);
+    }
+  }, [selectedAgent, organizationId]);
+
+  // Load test sessions when agent is selected and organization is available
+  useEffect(() => {
+    if (selectedAgent && organizationId) {
+      console.log('🧪 [AgentTestingContent] Loading test sessions for:', {
+        agentId: selectedAgent.id,
+        agentName: selectedAgent.name,
+        organizationId: organizationId
+      });
+      loadTestSessions();
+    } else {
+      console.log('🧪 [AgentTestingContent] Skipping session load:', {
+        hasSelectedAgent: !!selectedAgent,
+        hasOrganizationId: !!organizationId
+      });
+      setTestSessions([]);
+      setSelectedTestSession(null);
+    }
+  }, [selectedAgent, organizationId, loadTestSessions]);
+
+  // Cleanup subscriptions on unmount
+  useEffect(() => {
+    const refs = subscriptionRefs.current;
+    return () => {
+      const unsubscribeMessage = refs.message;
+      const unsubscribeStats = refs.stats;
+
+      if (unsubscribeMessage) {
+        try {
+          unsubscribeMessage();
+        } catch (error) {
+          console.error('Error cleaning up message subscription:', error);
+        }
+      }
+      if (unsubscribeStats) {
+        try {
+          unsubscribeStats();
+        } catch (error) {
+          console.error('Error cleaning up stats subscription:', error);
+        }
+      }
+    };
+  }, []);
+
+  const handleCreateSession = async () => {
+    if (!newSessionTitle.trim()) {
+      alert('Please enter a session title');
+      return;
+    }
+
+    try {
+      setIsCreatingSession(true);
+
+      // Get agent endpoint and API key
+      const agentEndpoint = await getAgentEndpoint(selectedAgent.id);
+      const apiKey = await ensureTestApiKey();
+
+      // Prepare request payload
+      const requestPayload = {
+        message: newSessionTitle,  // Title becomes first message = session title
+        user_id: currentUser.uid,
+        metadata: {
+          organization_id: organizationId,
+          session_creation: true,  // Mark this as session creation
+          session_description: newSessionDescription  // Include session description
+        },
+        response_mode: 'sync',
+        mode: 'testing'  // Mark as testing session
+      };
+
+      console.log('[CREATE SESSION] Sending request to webhook:', {
+        endpoint: `${agentEndpoint}/api/agent/webhook`,
+        payload: requestPayload,
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey?.substring(0, 10)}...`  // Log partial key for debugging
+        }
+      });
+
+      // Send session title as first message to create session
+      // The webhook will use this message as the session title
+      const response = await fetch(`${agentEndpoint}/api/agent/webhook`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`  // API key middleware requires Bearer format
+        },
+        body: JSON.stringify(requestPayload)
+      });
+
+      console.log('[CREATE SESSION] Response status:', response.status);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('[CREATE SESSION] Error response:', {
+          status: response.status,
+          statusText: response.statusText,
+          body: errorText
+        });
+        throw new Error(`Failed to create session: ${response.status} - ${errorText}`);
+      }
+
+      const responseData = await response.json();
+      console.log('[CREATE SESSION] Response data:', responseData);
+
+      const createdSessionId = responseData.session_id;
+
+      if (!createdSessionId) {
+        console.error('[CREATE SESSION] No session_id in response:', responseData);
+        throw new Error('No session_id returned from webhook');
+      }
+
+      console.log('[CREATE SESSION] Session created successfully:', createdSessionId);
+
+      // Create a lightweight session object for UI
+      const testSession = {
+        id: createdSessionId,
+        session_id: createdSessionId,
+        title: newSessionTitle,
+        created_at: new Date().toISOString(),
+        last_message_at: new Date().toISOString(),
+        status: 'active',
+        session_stats: {
+          total_messages: 0,
+          user_messages: 0,
+          assistant_messages: 0,
+          token_usage: {
+            total_tokens: 0,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            estimated_cost: 0
+          }
+        }
+      };
+
+      // Set the new session as active
+      setSelectedTestSession(testSession);
+      setSessionId(createdSessionId);
+
+      // Initialize empty messages - Firestore listener will populate them
+      setMessages([]);
+      setSessionStats(null);
+
+      // Setup subscriptions - this will load messages from Firestore
+      await setupSessionSubscriptions(createdSessionId, organizationId);
+
+      // Reload test sessions list
+      await loadTestSessions();
+
+      // Close dialog and reset form
+      setNewSessionDialogOpen(false);
+      setNewSessionTitle('');
+      setNewSessionDescription('');
+    } catch (error) {
+      console.error('Error creating test session:', error);
+      alert(`Failed to create session: ${error.message}`);
+    } finally {
+      setIsCreatingSession(false);
+    }
+  };
+
+  const handleSelectTestSession = async (testSession) => {
+    setSelectedTestSession(testSession);
+    setSessionId(testSession.session_id);
+    setMessages([]);
+    setSessionStats({
+      message_count: testSession.message_count || 0,
+      total_tokens: testSession.total_tokens || 0,
+      prompt_tokens: testSession.prompt_tokens || 0,
+      completion_tokens: testSession.completion_tokens || 0,
+      cost: testSession.cost || 0
+    });
+
+    // Load messages for this session
+    try {
+      const sessionMessages = await getSessionMessagesFromFirestore(
+        testSession.session_id,
+        organizationId,
+        { limit: 100 }
+      );
+
+      const formattedMessages = sessionMessages.map(msg => ({
+        id: msg.message_id || msg.id,
+        type: msg.role === 'user' ? 'user' : 'ai',
+        content: msg.content || '',
+        timestamp: msg.timestamp,
+        processing_time_ms: msg.processing_time_ms || 0,
+        total_tokens: msg.total_tokens || 0,
+        prompt_tokens: msg.prompt_tokens || 0,
+        completion_tokens: msg.completion_tokens || 0,
+        cost: msg.cost || 0
+      }));
+
+      setMessages(formattedMessages);
+
+      // Setup subscriptions
+      await setupSessionSubscriptions(testSession.session_id, organizationId);
+    } catch (error) {
+      console.error('Error loading session messages:', error);
+    }
+  };
+
+  const getAgentEndpoint = async (agentId) => {
+    try {
+      const agentServerDoc = doc(db, 'agent_servers', agentId);
+      const docSnapshot = await getDoc(agentServerDoc);
+
+      if (!docSnapshot.exists()) {
+        throw new Error('Agent server not found');
+      }
+
+      const serverData = docSnapshot.data();
+
+      if (!serverData.service_url || serverData.status !== 'active') {
+        throw new Error(`Agent server not active`);
+      }
+
+      agentEndpointRef.current = serverData.service_url;
+      return serverData.service_url;
+    } catch (error) {
+      console.error('Error getting agent endpoint:', error);
+      throw error;
+    }
+  };
+
+  const ensureTestApiKey = async () => {
+    // First check if we already have a key in memory
+    if (testApiKey) {
+      return testApiKey;
+    }
+
+    // Fetch or create test API key from Firestore (agent_servers collection)
+    try {
+      const result = await apiKeyService.findOrCreateTestApiKey(
+        selectedAgent.id,
+        currentUser.uid
+      );
+
+      if (result.success && result.apiKey) {
+        const apiKey = result.apiKey;
+        setTestApiKey(apiKey);
+        console.log('Test API key ready for use');
+        return apiKey;
+      } else {
+        throw new Error(result.error || 'Failed to obtain test API key');
+      }
+    } catch (error) {
+      console.error('Error ensuring test API key:', error);
+      throw error;
+    }
+  };
+
+  const setupSessionSubscriptions = async (sessionId, orgId) => {
+    try {
+      // Cleanup existing subscriptions
+      if (subscriptionRefs.current.message) {
+        subscriptionRefs.current.message();
+      }
+      if (subscriptionRefs.current.stats) {
+        subscriptionRefs.current.stats();
+      }
+
+      // Set up message subscription
+      const messageUnsubscribe = subscribeToSessionMessages(
+        sessionId,
+        orgId,
+        (messages) => {
+          const formattedMessages = messages.map(msg => ({
+            id: msg.message_id || msg.id,
+            type: msg.role === 'user' ? 'user' : 'ai',
+            content: msg.content || '',
+            timestamp: msg.timestamp,
+            processing_time_ms: msg.processing_time_ms || 0,
+            total_tokens: msg.total_tokens || 0,
+            prompt_tokens: msg.prompt_tokens || 0,
+            completion_tokens: msg.completion_tokens || 0,
+            cost: msg.cost || 0
+          }));
+          setMessages(formattedMessages);
+        },
+        (error) => {
+          console.error('Message subscription error:', error);
+        }
+      );
+
+      subscriptionRefs.current.message = messageUnsubscribe;
+
+      // Set up session stats subscription
+      const sessionDoc = doc(db, 'agent_sessions', sessionId);
+      const statsUnsubscribe = onSnapshot(sessionDoc, (docSnapshot) => {
+        if (docSnapshot.exists()) {
+          const sessionData = docSnapshot.data();
+
+          const stats = {
+            message_count: sessionData.message_count || 0,
+            total_tokens: sessionData.total_tokens || 0,
+            prompt_tokens: sessionData.prompt_tokens || 0,
+            completion_tokens: sessionData.completion_tokens || 0,
+            cost: sessionData.cost || 0
+          };
+
+          setSessionStats(stats);
+        }
+      });
+
+      subscriptionRefs.current.stats = statsUnsubscribe;
+    } catch (error) {
+      console.error('Error setting up subscriptions:', error);
+    }
+  };
+
+  const sendMessage = async () => {
+    if (!currentMessage.trim() || isSending || !selectedTestSession || !sessionId) return;
+
+    const messageToSend = currentMessage.trim();
+    setCurrentMessage('');
+    setIsSending(true);
+
+    try {
+      // Add user message (optimistic update)
+      const userMessage = {
+        id: `msg-${Date.now()}`,
+        type: 'user',
+        content: messageToSend,
+        timestamp: new Date().toISOString()
+      };
+      setMessages(prev => [...prev, userMessage]);
+
+      const agentEndpoint = await getAgentEndpoint(selectedAgent.id);
+      const apiKeyData = await ensureTestApiKey();
+      const apiKey = typeof apiKeyData === 'string' ? apiKeyData : apiKeyData.key;
+
+      // Use new webhook endpoint with sync mode
+      const response = await fetch(`${agentEndpoint}/api/agent/webhook`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`  // API key middleware requires Bearer format
+        },
+        body: JSON.stringify({
+          session_id: sessionId,
+          message: messageToSend,
+          user_id: currentUser.uid,
+          metadata: {
+            organization_id: organizationId
+          },
+          response_mode: 'sync',  // Get immediate response for testing
+          mode: 'testing'  // Mark as testing session
+        })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`HTTP error! status: ${response.status}, message: ${errorText}`);
+      }
+
+      const responseData = await response.json();
+
+      // Store session_id from first response (if this was first message)
+      if (responseData.session_id && !sessionId) {
+        setSessionId(responseData.session_id);
+        console.log(`New session created: ${responseData.session_id}`);
+
+        // Update test session with real session_id
+        if (selectedTestSession && !selectedTestSession.session_id) {
+          setSelectedTestSession(prev => ({
+            ...prev,
+            id: responseData.session_id,
+            session_id: responseData.session_id
+          }));
+        }
+      }
+
+      // Don't add AI response optimistically - let Firestore subscription handle it
+      // This prevents duplicate messages when subscription fires
+      console.log('Message sent successfully, waiting for Firestore subscription to update UI');
+    } catch (error) {
+      console.error('Error sending message:', error);
+
+      // Enhanced error messages
+      let errorContent = `Error: ${error.message}`;
+
+      if (error.message.includes('401') || error.message.includes('403')) {
+        errorContent = 'Authentication failed. Please check your API key and try again.';
+      } else if (error.message.includes('503')) {
+        errorContent = 'Agent is not initialized or unavailable. Please check deployment status.';
+      } else if (error.message.includes('404')) {
+        errorContent = 'Agent endpoint not found. Please verify the agent is deployed correctly.';
+      } else if (error.message.includes('Failed to fetch')) {
+        errorContent = 'Network error. Please check your internet connection and agent endpoint.';
+      }
+
+      const errorMessage = {
+        id: `msg-${Date.now() + 1}`,
+        type: 'error',
+        content: errorContent,
+        timestamp: new Date().toISOString()
+      };
+      setMessages(prev => [...prev, errorMessage]);
+    } finally {
+      setIsSending(false);
+    }
+  };
+
+  const handleKeyPress = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  };
+
+  const handleDeleteSession = (testSessionId) => {
+    setSessionToDelete(testSessionId);
+    setDeleteDialogOpen(true);
+  };
+
+  const confirmDeleteSession = async () => {
+    if (!sessionToDelete) return;
+
+    try {
+      await testingService.deleteTestSession(sessionToDelete);
+      await loadTestSessions();
+
+      if (selectedTestSession?.id === sessionToDelete) {
+        setSelectedTestSession(null);
+        setMessages([]);
+        setSessionId(null);
+      }
+
+      setDeleteDialogOpen(false);
+      setSessionToDelete(null);
+    } catch (error) {
+      console.error('Error deleting test session:', error);
+      alert(`Failed to delete session: ${error.message}`);
+    }
+  };
+
+  // Show no agent selected state (when no agentId provided at all)
+  if (!agentId) {
+    return (
+      <EmptyState
+        icon={ScienceIcon}
+        title="No Agent Selected"
+        subtitle="Please select an agent from the sidebar to start testing."
+        useCard={true}
+      />
+    );
+  }
+
+  // Loading deployment status
+  if (loadingDeploymentStatus) {
+    return (
+      <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>
+        <CircularProgress />
+      </Box>
+    );
+  }
+
+  // Agent is selected but not deployed
+  if (agentId && !isDeployed) {
+    return (
+      <EmptyState
+        icon={ScienceIcon}
+        title="Agent Not Deployed"
+        subtitle="This agent needs to be deployed before you can test it. Please deploy the agent first from the Deploy section."
+        useCard={true}
+      />
+    );
+  }
+
+  // Agent is deployed but not found
+  if (agentId && isDeployed && !selectedAgent) {
+    return (
+      <Box sx={{ p: 4 }}>
+        <Alert severity="info">
+          No deployed agents found. Please deploy an agent first before testing.
+        </Alert>
+      </Box>
+    );
+  }
+
+  return (
+    <Box sx={{ height: '100%', display: 'flex', overflow: 'hidden' }}>
+      {/* Left Sidebar - Test Sessions */}
+      <AgentTestingSidebar
+        sessions={testSessions}
+        selectedSession={selectedTestSession}
+        onSelectSession={handleSelectTestSession}
+        onCreateSession={() => setNewSessionDialogOpen(true)}
+        onDeleteSession={handleDeleteSession}
+        loading={loadingSessions}
+      />
+
+      {/* Main Panel - Chat Interface */}
+      <Box sx={{ flex: 1, overflow: 'auto' }}>
+        {selectedAgent && (
+          <Box sx={{ height: '100%', display: 'flex' }}>
+            <Box sx={{ height: '100%', width: '100%', display: 'flex', flexDirection: 'column', bgcolor: 'background.paper' }}>
+              {selectedTestSession ? (
+                <>
+                  {/* Chat Header */}
+                  <Box sx={{ p: 2, borderBottom: 1, borderColor: 'divider', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <Box>
+                      <Typography variant="h6">{selectedTestSession.title}</Typography>
+                      {selectedTestSession.description && (
+                        <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>
+                          {selectedTestSession.description}
+                        </Typography>
+                      )}
+                      {sessionStats && (
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+                          <Typography variant="caption" color="text.secondary">
+                            Messages: {sessionStats.message_count}
+                          </Typography>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.3 }}>
+                            <TokenIcon sx={{ fontSize: '14px', color: '#1976d2' }} />
+                            <Typography variant="caption" color="text.secondary">
+                              {sessionStats.total_tokens}
+                            </Typography>
+                          </Box>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.3 }}>
+                            <AttachMoneyIcon sx={{ fontSize: '14px', color: '#2e7d32' }} />
+                            <Typography variant="caption" color="text.secondary">
+                              {(sessionStats.cost || 0).toFixed(4)}
+                            </Typography>
+                          </Box>
+                        </Box>
+                      )}
+                    </Box>
+                  </Box>
+
+                  {/* Messages */}
+                  <Box sx={{ flex: 1, overflow: 'auto', p: 2 }}>
+                    {messages.length === 0 ? (
+                      <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+                        <BotIcon sx={{ fontSize: 64, color: 'text.secondary', mb: 2 }} />
+                        <Typography variant="body1" color="text.secondary">
+                          Start testing by sending a message
+                        </Typography>
+                      </Box>
+                    ) : (
+                      <Stack spacing={2}>
+                        {messages.map((message) => (
+                          <Box
+                            key={message.id}
+                            sx={{
+                              display: 'flex',
+                              justifyContent: message.type === 'user' ? 'flex-start' : 'flex-end',
+                              mb: 0.5,
+                              alignItems: 'flex-start'
+                            }}
+                          >
+                            {/* User Avatar */}
+                            {message.type === 'user' && (
+                              <Box sx={{ mr: 0.5, mt: 0.25 }}>
+                                <PersonIcon
+                                  sx={{
+                                    fontSize: 16,
+                                    color: 'white',
+                                    bgcolor: '#1976d2',
+                                    borderRadius: '50%',
+                                    p: 0.25
+                                  }}
+                                />
+                              </Box>
+                            )}
+
+                            <Paper
+                              elevation={0}
+                              sx={{
+                                maxWidth: '75%',
+                                minWidth: '80px',
+                                p: 0.75,
+                                backgroundColor:
+                                  message.type === 'error' ? '#d32f2f' :
+                                  message.type === 'user' ? 'rgba(25, 118, 210, 0.08)' : 'rgba(46, 125, 50, 0.08)',
+                                borderRadius: 1.5,
+                                borderTopLeftRadius: message.type === 'user' ? 0.25 : 1.5,
+                                borderTopRightRadius: message.type === 'user' ? 1.5 : 0.25,
+                                border: message.type === 'error' ? 'none' : `1px solid ${message.type === 'user' ? 'rgba(25, 118, 210, 0.2)' : 'rgba(46, 125, 50, 0.2)'}`
+                              }}
+                            >
+                              {/* Sender Name */}
+                              <Typography
+                                variant="caption"
+                                sx={{
+                                  display: 'block',
+                                  mb: 0.5,
+                                  fontWeight: 600,
+                                  color: message.type === 'error' ? '#ffffff' : message.type === 'user' ? '#1976d2' : '#2e7d32',
+                                  fontSize: '0.75rem'
+                                }}
+                              >
+                                {message.type === 'user' ? 'User' : selectedAgent.name}
+                              </Typography>
+
+                              {/* Message Content */}
+                              <Box sx={{ pr: 6 }}>
+                                <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', color: message.type === 'error' ? '#ffffff' : '#000000' }}>
+                                  {message.content}
+                                </Typography>
+                              </Box>
+
+                              {/* Footer */}
+                              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mt: 0.5 }}>
+                                <Typography variant="caption" color="text.secondary" fontSize="0.7rem" sx={{ opacity: 0.8 }}>
+                                  {new Date(message.timestamp).toLocaleTimeString()}
+                                </Typography>
+
+                                {/* Token, Cost, and Processing Time Info with Icons - Right */}
+                                {(message.total_tokens > 0 || message.cost > 0 || message.processing_time_ms > 0) && (
+                                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+                                    {message.total_tokens > 0 && (
+                                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.3 }}>
+                                        <TokenIcon sx={{ fontSize: '12px', color: '#1976d2' }} />
+                                        <Typography variant="caption" color="text.secondary" fontSize="0.7rem" sx={{ opacity: 0.8 }}>
+                                          {message.total_tokens}
+                                        </Typography>
+                                      </Box>
+                                    )}
+                                    {message.cost > 0 && (
+                                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.3 }}>
+                                        <AttachMoneyIcon sx={{ fontSize: '12px', color: '#2e7d32' }} />
+                                        <Typography variant="caption" color="text.secondary" fontSize="0.7rem" sx={{ opacity: 0.8 }}>
+                                          {message.cost.toFixed(4)}
+                                        </Typography>
+                                      </Box>
+                                    )}
+                                    {message.processing_time_ms > 0 && (
+                                      <Typography variant="caption" color="text.secondary" fontSize="0.7rem" sx={{ opacity: 0.8 }}>
+                                        {message.processing_time_ms}ms
+                                      </Typography>
+                                    )}
+                                  </Box>
+                                )}
+                              </Box>
+                            </Paper>
+
+                            {/* Agent Avatar */}
+                            {message.type === 'ai' && (
+                              <Box sx={{ ml: 0.5, mt: 0.25 }}>
+                                <BotIcon
+                                  sx={{
+                                    fontSize: 16,
+                                    color: 'white',
+                                    bgcolor: '#2e7d32',
+                                    borderRadius: '50%',
+                                    p: 0.25
+                                  }}
+                                />
+                              </Box>
+                            )}
+                          </Box>
+                        ))}
+                      </Stack>
+                    )}
+                  </Box>
+
+                  {/* Input Area */}
+                  <Box sx={{ p: 2, borderTop: 1, borderColor: 'divider' }}>
+                    <Box sx={{ display: 'flex', gap: 1 }}>
+                      <TextField
+                        fullWidth
+                        multiline
+                        maxRows={3}
+                        placeholder="Type your test message..."
+                        value={currentMessage}
+                        onChange={(e) => setCurrentMessage(e.target.value)}
+                        onKeyPress={handleKeyPress}
+                        disabled={isSending}
+                        size="small"
+                      />
+                      <IconButton
+                        onClick={sendMessage}
+                        disabled={!currentMessage.trim() || isSending}
+                        color="primary"
+                      >
+                        {isSending ? <CircularProgress size={24} /> : <SendIcon />}
+                      </IconButton>
+                    </Box>
+                  </Box>
+                </>
+              ) : (
+                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+                  <Typography variant="body1" color="text.secondary">
+                    Select a test session to begin
+                  </Typography>
+                </Box>
+              )}
+            </Box>
+          </Box>
+        )}
+      </Box>
+
+      {/* New Session Dialog */}
+      <Dialog open={newSessionDialogOpen} onClose={() => setNewSessionDialogOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Create New Test Session</DialogTitle>
+        <DialogContent>
+          <TextField
+            fullWidth
+            label="Session Title"
+            value={newSessionTitle}
+            onChange={(e) => setNewSessionTitle(e.target.value)}
+            sx={{ mt: 2, mb: 2 }}
+          />
+          <TextField
+            fullWidth
+            label="Description (Optional)"
+            value={newSessionDescription}
+            onChange={(e) => setNewSessionDescription(e.target.value)}
+            multiline
+            rows={3}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setNewSessionDialogOpen(false)}>Cancel</Button>
+          <Button
+            onClick={handleCreateSession}
+            variant="contained"
+            disabled={isCreatingSession || !newSessionTitle.trim()}
+          >
+            {isCreatingSession ? <CircularProgress size={24} /> : 'Create'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Delete Confirmation Dialog */}
+      <Dialog open={deleteDialogOpen} onClose={() => setDeleteDialogOpen(false)} maxWidth="xs" fullWidth>
+        <DialogTitle>Delete Test Session</DialogTitle>
+        <DialogContent>
+          <Typography>
+            Are you sure you want to delete this test session? This action cannot be undone.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeleteDialogOpen(false)}>Cancel</Button>
+          <Button onClick={confirmDeleteSession} variant="contained" color="error">
+            Delete
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </Box>
+  );
+};
+
+export default AgentTestingContent;

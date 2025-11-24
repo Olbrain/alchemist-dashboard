@@ -1,0 +1,976 @@
+import React, { useState, useEffect } from 'react';
+import {
+  Box,
+  Typography,
+  Button,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  Paper,
+  IconButton,
+  Chip,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  TextField,
+  CircularProgress,
+  Alert,
+  MenuItem,
+  Select,
+  FormControl,
+  InputLabel,
+  Tooltip
+} from '@mui/material';
+import {
+  Add as AddIcon,
+  Edit as EditIcon,
+  Delete as DeleteIcon,
+  Upload as UploadIcon,
+  Send as SendIcon,
+  Pause as PauseIcon,
+  PlayArrow as PlayArrowIcon,
+  Cancel as CancelIcon,
+  Visibility as VisibilityIcon,
+  ContactPhone as ContactPhoneIcon
+} from '@mui/icons-material';
+import { CardTitle, HelperText } from '../../utils/typography';
+import whatsappContactService from '../../services/whatsapp/whatsappContactService';
+import { cancelOutreachTask, pauseOutreachTask, resumeOutreachTask } from '../../services/whatsapp/whatsappOutreachService';
+import { db } from '../../utils/firebase';
+// import { collection, query, orderBy, onSnapshot, doc } from 'firebase/firestore'; // REMOVED: Firebase/Firestore
+import ScheduleOutreachDialog from './ScheduleOutreachDialog';
+import OutreachDetailsDialog from './OutreachDetailsDialog';
+import EmptyState from '../shared/EmptyState';
+
+export default function ContactsTab({ agentId, view = 'contacts', createNotification }) {
+  // view can be 'contacts' or 'outreach'
+
+  // Contacts state
+  const [contacts, setContacts] = useState([]);
+  const [contactsLoading, setContactsLoading] = useState(false);
+  const [contactDialogOpen, setContactDialogOpen] = useState(false);
+  const [editingContact, setEditingContact] = useState(null);
+  const [contactFormData, setContactFormData] = useState({
+    phone_number: '',
+    name: '',
+    email: '',
+    tags: '',
+    notes: ''
+  });
+
+  // CSV Import state
+  const [csvDialogOpen, setCsvDialogOpen] = useState(false);
+  const [csvContent, setCsvContent] = useState('');
+  const [csvImporting, setCSVImporting] = useState(false);
+
+  // Outreach tasks state
+  const [outreachTasks, setOutreachTasks] = useState([]);
+  const [outreachTasksLoading, setOutreachTasksLoading] = useState(false);
+  const [scheduleDialogOpen, setScheduleDialogOpen] = useState(false);
+  const [detailsDialogOpen, setDetailsDialogOpen] = useState(false);
+  const [selectedTask, setSelectedTask] = useState(null);
+  const [uniqueContactStats, setUniqueContactStats] = useState({
+    total: 0,
+    reached: 0,
+    failed: 0,
+    pending: 0
+  });
+
+  // Filter state
+  const [statusFilter, setStatusFilter] = useState('');
+
+  // Load contacts from Firestore
+  useEffect(() => {
+    if (!agentId) return;
+
+    setContactsLoading(true);
+
+    try {
+      // Subscribe to contacts subcollection in new outreach collection
+      const contactsQuery = query(
+        collection(db, 'outreach', agentId, 'contacts'),
+        orderBy('created_at', 'desc')
+      );
+
+      const unsubscribe = onSnapshot(contactsQuery,
+        (querySnapshot) => {
+          const fetchedContacts = querySnapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+          }));
+          setContacts(fetchedContacts);
+          setContactsLoading(false);
+        },
+        (error) => {
+          console.error('Error loading contacts:', error);
+          createNotification('error', 'Failed to load contacts');
+          setContactsLoading(false);
+        }
+      );
+
+      return () => unsubscribe();
+    } catch (error) {
+      console.error('Error setting up contacts listener:', error);
+      createNotification('error', 'Failed to initialize contacts');
+      setContactsLoading(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentId]);
+
+  // Load outreach tasks from Firestore
+  useEffect(() => {
+    if (!agentId) return;
+
+    setOutreachTasksLoading(true);
+
+    try {
+      // Subscribe to outreach tasks subcollection in new outreach collection
+      const tasksQuery = query(
+        collection(db, 'outreach', agentId, 'tasks'),
+        orderBy('created_at', 'desc')
+      );
+
+      const unsubscribe = onSnapshot(tasksQuery,
+        (querySnapshot) => {
+          const fetchedTasks = querySnapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+          }));
+          setOutreachTasks(fetchedTasks);
+          setOutreachTasksLoading(false);
+        },
+        (error) => {
+          console.error('Error loading outreach tasks:', error);
+          createNotification('error', 'Failed to load outreach tasks');
+          setOutreachTasksLoading(false);
+        }
+      );
+
+      return () => unsubscribe();
+    } catch (error) {
+      console.error('Error setting up tasks listener:', error);
+      createNotification('error', 'Failed to initialize outreach tasks');
+      setOutreachTasksLoading(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentId]);
+
+  // Load unique contact statistics from outreach summary
+  useEffect(() => {
+    if (!agentId) {
+      setUniqueContactStats({ total: 0, reached: 0, failed: 0 });
+      return;
+    }
+
+    try {
+      // Subscribe to outreach summary document
+      const summaryRef = doc(db, 'outreach', agentId);
+
+      const unsubscribe = onSnapshot(summaryRef,
+        (docSnapshot) => {
+          if (docSnapshot.exists()) {
+            const summaryData = docSnapshot.data();
+            const targetedContacts = summaryData.targeted_contacts || [];
+            const reachedContacts = summaryData.reached_contacts || [];
+            const pendingContacts = summaryData.pending_contacts || [];
+
+            setUniqueContactStats({
+              total: targetedContacts.length,
+              reached: reachedContacts.length,
+              failed: targetedContacts.length - reachedContacts.length - pendingContacts.length,
+              pending: pendingContacts.length
+            });
+          } else {
+            // No summary document exists yet
+            setUniqueContactStats({ total: 0, reached: 0, failed: 0, pending: 0 });
+          }
+        },
+        (error) => {
+          console.error('Error loading outreach summary:', error);
+          setUniqueContactStats({ total: 0, reached: 0, failed: 0, pending: 0 });
+        }
+      );
+
+      return () => unsubscribe();
+    } catch (error) {
+      console.error('Error setting up summary listener:', error);
+      setUniqueContactStats({ total: 0, reached: 0, failed: 0 });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentId]);
+
+  // Contact CRUD operations
+  const handleCreateContact = () => {
+    setEditingContact(null);
+    setContactFormData({
+      phone_number: '',
+      name: ''
+    });
+    setContactDialogOpen(true);
+  };
+
+  const handleEditContact = (contact) => {
+    setEditingContact(contact);
+    setContactFormData({
+      phone_number: contact.phone_number,
+      name: contact.name,
+      email: contact.email || '',
+      tags: contact.tags?.join(', ') || '',
+      notes: contact.notes || ''
+    });
+    setContactDialogOpen(true);
+  };
+
+  const handleSaveContact = async () => {
+    try {
+      let contactData;
+
+      if (editingContact) {
+        // When editing, include all fields
+        contactData = {
+          phone_number: contactFormData.phone_number,
+          name: contactFormData.name || null,
+          email: contactFormData.email || null,
+          tags: contactFormData.tags ? contactFormData.tags.split(',').map(t => t.trim()).filter(t => t) : [],
+          notes: contactFormData.notes || null
+        };
+        await whatsappContactService.updateContact(agentId, editingContact.id, contactData);
+        createNotification('success', 'Contact updated successfully');
+      } else {
+        // When creating, send phone_number and optional name
+        contactData = {
+          phone_number: contactFormData.phone_number,
+          name: contactFormData.name || null
+        };
+        await whatsappContactService.createContact(agentId, contactData);
+        createNotification('success', 'Contact created successfully');
+      }
+
+      setContactDialogOpen(false);
+    } catch (error) {
+      console.error('Error saving contact:', error);
+      createNotification('error', error.message || 'Failed to save contact');
+    }
+  };
+
+  const handleDeleteContact = async (contactId) => {
+    if (!window.confirm('Are you sure you want to delete this contact?')) {
+      return;
+    }
+
+    try {
+      await whatsappContactService.deleteContact(agentId, contactId);
+      createNotification('success', 'Contact deleted successfully');
+    } catch (error) {
+      console.error('Error deleting contact:', error);
+      createNotification('error', 'Failed to delete contact');
+    }
+  };
+
+  // CSV Import
+  const handleCSVImport = () => {
+    setCsvContent('');
+    setCsvDialogOpen(true);
+  };
+
+  const handleFileUpload = (event) => {
+    const file = event.target.files[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        setCsvContent(e.target.result);
+      };
+      reader.readAsText(file);
+    }
+  };
+
+  const handleImportCSV = async () => {
+    if (!csvContent.trim()) {
+      createNotification('error', 'Please provide CSV content');
+      return;
+    }
+
+    setCSVImporting(true);
+    try {
+      const response = await whatsappContactService.importContactsFromCSV(agentId, csvContent);
+
+      const results = response.results;
+      const message = `Imported: ${results.successful.length} successful, ${results.failed.length} failed`;
+      createNotification('success', message);
+
+      setCsvDialogOpen(false);
+    } catch (error) {
+      console.error('Error importing CSV:', error);
+      createNotification('error', error.message || 'Failed to import CSV');
+    } finally {
+      setCSVImporting(false);
+    }
+  };
+
+  // Outreach task operations
+  const handleScheduleOutreach = () => {
+    setScheduleDialogOpen(true);
+  };
+
+  const handleViewDetails = (task) => {
+    setSelectedTask(task);
+    setDetailsDialogOpen(true);
+  };
+
+  const handlePauseTask = async (taskId) => {
+    try {
+      await pauseOutreachTask(agentId, taskId);
+      createNotification('success', 'Outreach task paused');
+    } catch (error) {
+      console.error('Error pausing task:', error);
+      createNotification('error', 'Failed to pause task');
+    }
+  };
+
+  const handleResumeTask = async (taskId) => {
+    try {
+      await resumeOutreachTask(agentId, taskId);
+      createNotification('success', 'Outreach task resumed');
+    } catch (error) {
+      console.error('Error resuming task:', error);
+      createNotification('error', 'Failed to resume task');
+    }
+  };
+
+  const handleCancelTask = async (taskId) => {
+    if (!window.confirm('Are you sure you want to cancel this outreach task?')) {
+      return;
+    }
+
+    try {
+      await cancelOutreachTask(agentId, taskId);
+      createNotification('success', 'Outreach task cancelled');
+    } catch (error) {
+      console.error('Error cancelling task:', error);
+      createNotification('error', 'Failed to cancel task');
+    }
+  };
+
+  const getStatusColor = (status) => {
+    const colors = {
+      active: 'success',
+      inactive: 'default',
+      blocked: 'error',
+      pending: 'info',
+      in_progress: 'warning',
+      completed: 'success',
+      failed: 'error',
+      cancelled: 'default',
+      paused: 'default'
+    };
+    return colors[status] || 'default';
+  };
+
+  // Filtered contacts
+  const filteredContacts = statusFilter
+    ? contacts.filter(c => c.status === statusFilter)
+    : contacts;
+
+  return (
+    <Box sx={{ p: 3 }}>
+      {/* Contacts View */}
+      {view === 'contacts' && (
+        <Box>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
+            <CardTitle>Contacts</CardTitle>
+            <Box sx={{ display: 'flex', gap: 2 }}>
+              <FormControl size="small" sx={{ minWidth: 120 }}>
+                <InputLabel>Status</InputLabel>
+                <Select
+                  value={statusFilter}
+                  label="Status"
+                  onChange={(e) => setStatusFilter(e.target.value)}
+                >
+                  <MenuItem value="">All</MenuItem>
+                  <MenuItem value="active">Active</MenuItem>
+                  <MenuItem value="inactive">Inactive</MenuItem>
+                  <MenuItem value="blocked">Blocked</MenuItem>
+                </Select>
+              </FormControl>
+              <Button
+                variant="outlined"
+                startIcon={<UploadIcon />}
+                onClick={handleCSVImport}
+              >
+                Import CSV
+              </Button>
+              <Button
+                variant="contained"
+                startIcon={<AddIcon />}
+                onClick={handleCreateContact}
+              >
+                Add Contact
+              </Button>
+            </Box>
+          </Box>
+
+          {contactsLoading ? (
+            <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}>
+              <CircularProgress />
+            </Box>
+          ) : filteredContacts.length === 0 ? (
+            <EmptyState
+              icon={ContactPhoneIcon}
+              title="No Contacts Yet"
+              subtitle="Add contacts manually or import from CSV to get started"
+              useCard={true}
+            />
+          ) : (
+            <TableContainer component={Paper}>
+              <Table>
+                <TableHead>
+                  <TableRow>
+                    <TableCell>Name</TableCell>
+                    <TableCell>Phone</TableCell>
+                    <TableCell>Email</TableCell>
+                    <TableCell>Tags</TableCell>
+                    <TableCell>Status</TableCell>
+                    <TableCell>Reached</TableCell>
+                    <TableCell>Actions</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {filteredContacts.map((contact) => (
+                    <TableRow key={contact.id}>
+                      <TableCell>{contact.name || '-'}</TableCell>
+                      <TableCell>{contact.phone_number}</TableCell>
+                      <TableCell>{contact.email || '-'}</TableCell>
+                      <TableCell>
+                        {contact.tags && contact.tags.length > 0 ? (
+                          <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
+                            {contact.tags.map((tag, idx) => (
+                              <Chip key={idx} label={tag} size="small" />
+                            ))}
+                          </Box>
+                        ) : (
+                          '-'
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <Chip
+                          label={contact.status || 'active'}
+                          color={getStatusColor(contact.status || 'active')}
+                          size="small"
+                        />
+                      </TableCell>
+                      <TableCell>
+                        {(() => {
+                          const stats = contact.contact_stats || {};
+                          const messagesSent = stats.messages_sent || 0;
+                          const messagesDelivered = stats.messages_delivered || 0;
+                          const messagesRead = stats.messages_read || 0;
+                          const messagesFailed = stats.messages_failed || 0;
+                          const lastStatus = stats.last_message_status || 'N/A';
+
+                          if (messagesDelivered > 0 || messagesRead > 0) {
+                            return (
+                              <Tooltip
+                                title={
+                                  <Box sx={{ p: 0.5 }}>
+                                    <HelperText sx={{ display: 'block', fontWeight: 600, mb: 0.5, color: '#ffffff' }}>
+                                      Outreach Statistics
+                                    </HelperText>
+                                    <HelperText sx={{ display: 'block', color: 'rgba(255, 255, 255, 0.9)' }}>
+                                      Messages Sent: {messagesSent}
+                                    </HelperText>
+                                    <HelperText sx={{ display: 'block', color: 'rgba(255, 255, 255, 0.9)' }}>
+                                      Delivered: {messagesDelivered}
+                                    </HelperText>
+                                    <HelperText sx={{ display: 'block', color: 'rgba(255, 255, 255, 0.9)' }}>
+                                      Read: {messagesRead}
+                                    </HelperText>
+                                    <HelperText sx={{ display: 'block', color: 'rgba(255, 255, 255, 0.9)' }}>
+                                      Failed: {messagesFailed}
+                                    </HelperText>
+                                    <HelperText sx={{ display: 'block', mt: 0.5, fontStyle: 'italic', color: 'rgba(255, 255, 255, 0.7)' }}>
+                                      Last Status: {lastStatus}
+                                    </HelperText>
+                                  </Box>
+                                }
+                                arrow
+                                placement="top"
+                              >
+                                <Chip
+                                  label="Reached"
+                                  color="success"
+                                  size="small"
+                                />
+                              </Tooltip>
+                            );
+                          } else if (messagesSent > 0) {
+                            return (
+                              <Tooltip
+                                title={
+                                  <Box sx={{ p: 0.5 }}>
+                                    <HelperText sx={{ display: 'block', fontWeight: 600, mb: 0.5, color: '#ffffff' }}>
+                                      Outreach Statistics
+                                    </HelperText>
+                                    <HelperText sx={{ display: 'block', color: 'rgba(255, 255, 255, 0.9)' }}>
+                                      Messages Sent: {messagesSent}
+                                    </HelperText>
+                                    <HelperText sx={{ display: 'block', color: 'rgba(255, 255, 255, 0.9)' }}>
+                                      Delivered: {messagesDelivered}
+                                    </HelperText>
+                                    <HelperText sx={{ display: 'block', color: 'rgba(255, 255, 255, 0.9)' }}>
+                                      Read: {messagesRead}
+                                    </HelperText>
+                                    <HelperText sx={{ display: 'block', color: 'rgba(255, 255, 255, 0.9)' }}>
+                                      Failed: {messagesFailed}
+                                    </HelperText>
+                                    <HelperText sx={{ display: 'block', mt: 0.5, fontStyle: 'italic', color: 'rgba(255, 255, 255, 0.7)' }}>
+                                      Last Status: {lastStatus}
+                                    </HelperText>
+                                  </Box>
+                                }
+                                arrow
+                                placement="top"
+                              >
+                                <Chip
+                                  label="Not Reached"
+                                  color="default"
+                                  size="small"
+                                />
+                              </Tooltip>
+                            );
+                          } else {
+                            return (
+                              <Chip
+                                label="No Outreach"
+                                color="default"
+                                size="small"
+                                variant="outlined"
+                              />
+                            );
+                          }
+                        })()}
+                      </TableCell>
+                      <TableCell>
+                        <IconButton
+                          size="small"
+                          onClick={() => handleEditContact(contact)}
+                          title="Edit"
+                        >
+                          <EditIcon fontSize="small" />
+                        </IconButton>
+                        <IconButton
+                          size="small"
+                          onClick={() => handleDeleteContact(contact.id)}
+                          title="Delete"
+                        >
+                          <DeleteIcon fontSize="small" />
+                        </IconButton>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          )}
+        </Box>
+      )}
+
+      {/* Outreach View */}
+      {view === 'outreach' && (
+        <Box>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
+            <CardTitle>Outreach Tasks</CardTitle>
+            <Button
+              variant="contained"
+              startIcon={<SendIcon />}
+              onClick={handleScheduleOutreach}
+            >
+              Schedule Outreach
+            </Button>
+          </Box>
+
+          {/* Aggregate Summary */}
+          {!outreachTasksLoading && outreachTasks.length > 0 && (
+            <Paper sx={{ p: 2, mb: 3, bgcolor: '#f9fafb' }}>
+              <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 1.5 }}>
+                Overall Outreach Summary
+              </Typography>
+              <Box sx={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                <Box>
+                  <HelperText sx={{ display: 'block' }}>
+                    Total Contacts Targeted
+                  </HelperText>
+                  <Typography variant="h6" sx={{ fontWeight: 700, color: '#2196f3' }}>
+                    {uniqueContactStats.total}
+                  </Typography>
+                </Box>
+                <Box sx={{ borderLeft: '1px solid #e0e0e0', pl: 4 }}>
+                  <HelperText sx={{ display: 'block' }}>
+                    Successfully Reached
+                  </HelperText>
+                  <Typography variant="h6" sx={{ fontWeight: 700, color: '#4caf50' }}>
+                    {uniqueContactStats.reached}
+                  </Typography>
+                </Box>
+                <Box sx={{ borderLeft: '1px solid #e0e0e0', pl: 4 }}>
+                  <HelperText sx={{ display: 'block' }}>
+                    Failed to Reach
+                  </HelperText>
+                  <Typography variant="h6" sx={{ fontWeight: 700, color: '#f44336' }}>
+                    {uniqueContactStats.failed}
+                  </Typography>
+                </Box>
+                <Box sx={{ borderLeft: '1px solid #e0e0e0', pl: 4 }}>
+                  <HelperText sx={{ display: 'block' }}>
+                    Pending Outreach
+                  </HelperText>
+                  <Typography variant="h6" sx={{ fontWeight: 700, color: '#ff9800' }}>
+                    {uniqueContactStats.pending}
+                  </Typography>
+                </Box>
+                <Box sx={{ borderLeft: '1px solid #e0e0e0', pl: 4 }}>
+                  <HelperText sx={{ display: 'block' }}>
+                    Success Rate
+                  </HelperText>
+                  <Typography variant="h6" sx={{ fontWeight: 700, color: '#03a9f4' }}>
+                    {uniqueContactStats.total > 0
+                      ? `${Math.round((uniqueContactStats.reached / uniqueContactStats.total) * 100)}%`
+                      : '0%'}
+                  </Typography>
+                </Box>
+              </Box>
+            </Paper>
+          )}
+
+          {outreachTasksLoading ? (
+            <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}>
+              <CircularProgress />
+            </Box>
+          ) : outreachTasks.length === 0 ? (
+            <EmptyState
+              icon={SendIcon}
+              title="No Outreach Tasks"
+              subtitle="Schedule an outreach task to start reaching your contacts"
+              useCard={true}
+            />
+          ) : (
+            <TableContainer component={Paper}>
+              <Table>
+                <TableHead>
+                  <TableRow>
+                    <TableCell>Type</TableCell>
+                    <TableCell>Instructions</TableCell>
+                    <TableCell>Target</TableCell>
+                    <TableCell>Status</TableCell>
+                    <TableCell>Progress</TableCell>
+                    <TableCell>Created</TableCell>
+                    <TableCell>Scheduled</TableCell>
+                    <TableCell>Actions</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {outreachTasks.map((task) => (
+                    <TableRow key={task.id} hover>
+                      <TableCell>
+                        <Chip
+                          label={task.outreach_type || 'immediate'}
+                          size="small"
+                          variant="outlined"
+                        />
+                      </TableCell>
+                      <TableCell>
+                        <Typography variant="body2" noWrap sx={{ maxWidth: 250 }}>
+                          {task.agent_instructions}
+                        </Typography>
+                      </TableCell>
+                      <TableCell>
+                        <Box>
+                          {task.contact_ids && task.contact_ids.length > 0 ? (
+                            <Chip
+                              label={`${task.contact_ids.length} contact${task.contact_ids.length > 1 ? 's' : ''}`}
+                              size="small"
+                              color="primary"
+                              variant="outlined"
+                            />
+                          ) : task.tags && task.tags.length > 0 ? (
+                            <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
+                              {task.tags.map((tag, idx) => (
+                                <Chip key={idx} label={tag} size="small" />
+                              ))}
+                            </Box>
+                          ) : (
+                            <HelperText>
+                              All contacts
+                            </HelperText>
+                          )}
+                        </Box>
+                      </TableCell>
+                      <TableCell>
+                        <Chip
+                          label={task.status || 'pending'}
+                          color={getStatusColor(task.status || 'pending')}
+                          size="small"
+                        />
+                      </TableCell>
+                      <TableCell>
+                        {(() => {
+                          // If progress exists (task has been executed), use it
+                          if (task.progress && task.progress.total > 0) {
+                            return (
+                              <Box>
+                                <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                                  {task.progress.sent || 0} / {task.progress.total}
+                                </Typography>
+                                <HelperText>
+                                  ({Math.round(((task.progress.sent || 0) / task.progress.total) * 100)}%)
+                                </HelperText>
+                              </Box>
+                            );
+                          }
+
+                          // For pending tasks, calculate expected contact count
+                          if (task.contact_ids && task.contact_ids.length > 0) {
+                            return (
+                              <Box>
+                                <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                                  0 / {task.contact_ids.length}
+                                </Typography>
+                                <HelperText>
+                                  (Pending)
+                                </HelperText>
+                              </Box>
+                            );
+                          }
+
+                          // For tag-based tasks, show tag count indicator
+                          if (task.tags && task.tags.length > 0) {
+                            return (
+                              <Box>
+                                <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                                  Ready
+                                </Typography>
+                                <HelperText>
+                                  ({task.tags.length} tag{task.tags.length > 1 ? 's' : ''})
+                                </HelperText>
+                              </Box>
+                            );
+                          }
+
+                          // Fallback for tasks without contact selection
+                          return (
+                            <HelperText>
+                              Not started
+                            </HelperText>
+                          );
+                        })()}
+                      </TableCell>
+                      <TableCell>
+                        {task.created_at ? (
+                          <HelperText>
+                            {new Date(task.created_at.seconds * 1000).toLocaleDateString()}
+                          </HelperText>
+                        ) : (
+                          '-'
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        {task.next_run_at ? (
+                          <HelperText>
+                            {new Date(task.next_run_at.seconds * 1000).toLocaleString()}
+                          </HelperText>
+                        ) : (
+                          <HelperText>
+                            Immediate
+                          </HelperText>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <Box sx={{ display: 'flex', gap: 0.5 }}>
+                          <IconButton
+                            size="small"
+                            onClick={() => handleViewDetails(task)}
+                            title="View Details"
+                            color="primary"
+                          >
+                            <VisibilityIcon fontSize="small" />
+                          </IconButton>
+                          {task.status === 'pending' && (
+                            <IconButton
+                              size="small"
+                              onClick={() => handlePauseTask(task.id)}
+                              title="Pause"
+                            >
+                              <PauseIcon fontSize="small" />
+                            </IconButton>
+                          )}
+                          {task.status === 'paused' && (
+                            <IconButton
+                              size="small"
+                              onClick={() => handleResumeTask(task.id)}
+                              title="Resume"
+                            >
+                              <PlayArrowIcon fontSize="small" />
+                            </IconButton>
+                          )}
+                          {(task.status === 'pending' || task.status === 'paused') && (
+                            <IconButton
+                              size="small"
+                              onClick={() => handleCancelTask(task.id)}
+                              title="Cancel"
+                              color="error"
+                            >
+                              <CancelIcon fontSize="small" />
+                            </IconButton>
+                          )}
+                        </Box>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          )}
+        </Box>
+      )}
+
+      {/* Contact Dialog */}
+      <Dialog
+        open={contactDialogOpen}
+        onClose={() => setContactDialogOpen(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>
+          {editingContact ? 'Edit Contact' : 'Add Contact'}
+        </DialogTitle>
+        <DialogContent>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, mt: 2 }}>
+            <TextField
+              label="Phone Number"
+              placeholder="+1234567890"
+              value={contactFormData.phone_number}
+              onChange={(e) => setContactFormData({ ...contactFormData, phone_number: e.target.value })}
+              disabled={!!editingContact}
+              required
+              helperText="E.164 format required (e.g., +1234567890)"
+            />
+            <TextField
+              label="Name (Optional)"
+              value={contactFormData.name || ''}
+              onChange={(e) => setContactFormData({ ...contactFormData, name: e.target.value })}
+            />
+            {editingContact && (
+              <>
+                <TextField
+                  label="Email (Optional)"
+                  type="email"
+                  value={contactFormData.email || ''}
+                  onChange={(e) => setContactFormData({ ...contactFormData, email: e.target.value })}
+                />
+                <TextField
+                  label="Tags (Optional)"
+                  placeholder="customer, vip, lead"
+                  value={contactFormData.tags || ''}
+                  onChange={(e) => setContactFormData({ ...contactFormData, tags: e.target.value })}
+                  helperText="Comma-separated tags"
+                />
+                <TextField
+                  label="Notes (Optional)"
+                  multiline
+                  rows={3}
+                  value={contactFormData.notes || ''}
+                  onChange={(e) => setContactFormData({ ...contactFormData, notes: e.target.value })}
+                />
+              </>
+            )}
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setContactDialogOpen(false)}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={handleSaveContact}
+            disabled={!contactFormData.phone_number}
+          >
+            Save
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* CSV Import Dialog */}
+      <Dialog
+        open={csvDialogOpen}
+        onClose={() => setCsvDialogOpen(false)}
+        maxWidth="md"
+        fullWidth
+      >
+        <DialogTitle>Import Contacts from CSV</DialogTitle>
+        <DialogContent>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, mt: 2 }}>
+            <Alert severity="info">
+              CSV format: phone_number, name, email, tags, notes<br />
+              Only <strong>phone_number</strong> is required. All other fields are optional.<br />
+              Tags should be comma-separated if provided.
+            </Alert>
+            <Button
+              variant="outlined"
+              component="label"
+              startIcon={<UploadIcon />}
+            >
+              Upload CSV File
+              <input
+                type="file"
+                accept=".csv"
+                hidden
+                onChange={handleFileUpload}
+              />
+            </Button>
+            <TextField
+              label="CSV Content"
+              multiline
+              rows={10}
+              value={csvContent}
+              onChange={(e) => setCsvContent(e.target.value)}
+              placeholder="phone_number,name,email,tags,notes&#10;+1234567890,John Doe,john@example.com,vip,Important client&#10;+9876543210,,,,&#10;+1122334455,Jane Smith,,,Potential lead"
+            />
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setCsvDialogOpen(false)}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={handleImportCSV}
+            disabled={csvImporting || !csvContent.trim()}
+          >
+            {csvImporting ? <CircularProgress size={24} /> : 'Import'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Schedule Outreach Dialog */}
+      {scheduleDialogOpen && (
+        <ScheduleOutreachDialog
+          open={scheduleDialogOpen}
+          onClose={() => setScheduleDialogOpen(false)}
+          agentId={agentId}
+          contacts={contacts}
+          createNotification={createNotification}
+        />
+      )}
+
+      {/* Outreach Details Dialog */}
+      {detailsDialogOpen && (
+        <OutreachDetailsDialog
+          open={detailsDialogOpen}
+          onClose={() => setDetailsDialogOpen(false)}
+          agentId={agentId}
+          task={selectedTask}
+          createNotification={createNotification}
+        />
+      )}
+    </Box>
+  );
+}

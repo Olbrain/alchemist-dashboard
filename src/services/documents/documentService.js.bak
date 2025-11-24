@@ -1,0 +1,418 @@
+/**
+ * Document Service
+ *
+ * Service for managing agent document library
+ * - Write operations (upload/update/delete) via agent-builder-ai-service backend
+ * - Read operations (list/get/stats) directly from Firestore
+ */
+
+import {
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  query,
+  where,
+  orderBy
+} from 'firebase/firestore';
+import { db } from '../../utils/firebase';
+import { Collections } from '../../constants/collections';
+import agentBuilderApi from '../api/agentBuilderApiClient';
+
+/**
+ * Upload a document to agent's document library
+ * Uses backend API for upload
+ *
+ * @param {string} agentId - Agent ID
+ * @param {File} file - File object to upload
+ * @param {Object} metadata - Document metadata
+ * @param {function} onProgress - Progress callback (0-100)
+ * @returns {Promise<Object>} Document data with ID
+ */
+export const uploadDocument = async (agentId, file, metadata, onProgress = null) => {
+  try {
+    if (!agentId) {
+      throw new Error('Agent ID is required');
+    }
+
+    if (!file) {
+      throw new Error('File is required');
+    }
+
+    // Validate file size (max 50MB)
+    const maxSizeBytes = 50 * 1024 * 1024;
+    if (file.size > maxSizeBytes) {
+      throw new Error('File size exceeds 50MB limit');
+    }
+
+    // Upload via backend API
+    const result = await agentBuilderApi.uploadDocument(
+      agentId,
+      file,
+      metadata,
+      onProgress
+    );
+
+    return result;
+  } catch (error) {
+    console.error('Error in uploadDocument:', error);
+    throw error;
+  }
+};
+
+/**
+ * List all documents for an agent with optional filters
+ *
+ * @param {string} agentId - Agent ID
+ * @param {Object} filters - Optional filters (category, tag, format)
+ * @returns {Promise<Array>} Array of documents
+ */
+export const listDocuments = async (agentId, filters = {}) => {
+  try {
+    if (!agentId) {
+      throw new Error('Agent ID is required');
+    }
+
+    const documentsRef = collection(db, Collections.AGENTS, agentId, 'documents');
+    let q = query(documentsRef, orderBy('uploaded_at', 'desc'));
+
+    // Apply filters
+    if (filters.category) {
+      q = query(q, where('category', '==', filters.category));
+    }
+
+    if (filters.format) {
+      q = query(q, where('format', '==', filters.format.toLowerCase()));
+    }
+
+    // Note: array-contains can only be used once per query
+    if (filters.tag) {
+      q = query(q, where('tags', 'array-contains', filters.tag));
+    }
+
+    const querySnapshot = await getDocs(q);
+
+    const documents = [];
+    querySnapshot.forEach((doc) => {
+      documents.push({
+        id: doc.id,
+        ...doc.data()
+      });
+    });
+
+    return documents;
+  } catch (error) {
+    console.error('Error listing documents:', error);
+    throw new Error(`Failed to list documents: ${error.message}`);
+  }
+};
+
+/**
+ * Get a single document by ID
+ *
+ * @param {string} agentId - Agent ID
+ * @param {string} documentId - Document ID
+ * @returns {Promise<Object>} Document data
+ */
+export const getDocument = async (agentId, documentId) => {
+  try {
+    if (!agentId || !documentId) {
+      throw new Error('Agent ID and Document ID are required');
+    }
+
+    const documentRef = doc(db, Collections.AGENTS, agentId, 'documents', documentId);
+    const documentSnap = await getDoc(documentRef);
+
+    if (!documentSnap.exists()) {
+      throw new Error('Document not found');
+    }
+
+    return {
+      id: documentSnap.id,
+      ...documentSnap.data()
+    };
+  } catch (error) {
+    console.error('Error getting document:', error);
+    throw error;
+  }
+};
+
+/**
+ * Update document metadata
+ * Uses backend API for update
+ *
+ * @param {string} agentId - Agent ID
+ * @param {string} documentId - Document ID
+ * @param {Object} updates - Fields to update
+ * @returns {Promise<Object>} Updated document
+ */
+export const updateDocument = async (agentId, documentId, updates) => {
+  try {
+    if (!agentId || !documentId) {
+      throw new Error('Agent ID and Document ID are required');
+    }
+
+    // Only allow updating certain fields
+    const allowedFields = ['name', 'description', 'category', 'tags', 'keywords'];
+    const filteredUpdates = {};
+
+    for (const field of allowedFields) {
+      if (updates.hasOwnProperty(field)) {
+        filteredUpdates[field] = updates[field];
+      }
+    }
+
+    if (Object.keys(filteredUpdates).length === 0) {
+      throw new Error('No valid fields to update');
+    }
+
+    return await agentBuilderApi.updateDocument(agentId, documentId, filteredUpdates);
+  } catch (error) {
+    console.error('Error updating document:', error);
+    throw new Error(`Failed to update document: ${error.message}`);
+  }
+};
+
+/**
+ * Delete a document and its file from storage
+ * Uses backend API for delete
+ *
+ * @param {string} agentId - Agent ID
+ * @param {string} documentId - Document ID
+ * @returns {Promise<Object>} Delete result
+ */
+export const deleteDocument = async (agentId, documentId) => {
+  try {
+    if (!agentId || !documentId) {
+      throw new Error('Agent ID and Document ID are required');
+    }
+
+    return await agentBuilderApi.deleteDocument(agentId, documentId);
+  } catch (error) {
+    console.error('Error deleting document:', error);
+    throw new Error(`Failed to delete document: ${error.message}`);
+  }
+};
+
+/**
+ * Search documents by name, description, tags, keywords
+ *
+ * @param {string} agentId - Agent ID
+ * @param {string} searchQuery - Search query string
+ * @returns {Promise<Array>} Array of matching documents sorted by relevance
+ */
+export const searchDocuments = async (agentId, searchQuery) => {
+  try {
+    if (!agentId) {
+      throw new Error('Agent ID is required');
+    }
+
+    if (!searchQuery || searchQuery.trim().length === 0) {
+      return await listDocuments(agentId);
+    }
+
+    // Get all documents
+    const allDocuments = await listDocuments(agentId);
+
+    // Calculate relevance score for each document
+    const query = searchQuery.toLowerCase().trim();
+    const queryWords = query.split(/\s+/);
+
+    const scoredDocuments = allDocuments.map(doc => {
+      let score = 0;
+
+      const name = (doc.name || '').toLowerCase();
+      const description = (doc.description || '').toLowerCase();
+      const category = (doc.category || '').toLowerCase();
+      const tags = (doc.tags || []).map(t => t.toLowerCase());
+      const keywords = (doc.keywords || []).map(k => k.toLowerCase());
+
+      // Exact name match = highest score
+      if (query === name) {
+        score += 100;
+      } else if (name.includes(query)) {
+        score += 50;
+      }
+
+      // Query words in name
+      queryWords.forEach(word => {
+        if (name.includes(word)) {
+          score += 20;
+        }
+      });
+
+      // Description contains query
+      if (description.includes(query)) {
+        score += 15;
+      }
+
+      // Category match
+      if (query === category) {
+        score += 30;
+      } else if (category.includes(query)) {
+        score += 10;
+      }
+
+      // Tags match
+      tags.forEach(tag => {
+        if (query === tag) {
+          score += 40;
+        } else if (tag.includes(query)) {
+          score += 15;
+        }
+      });
+
+      // Keywords match
+      keywords.forEach(keyword => {
+        if (query === keyword) {
+          score += 35;
+        } else if (keyword.includes(query)) {
+          score += 12;
+        }
+      });
+
+      return {
+        ...doc,
+        relevance_score: score
+      };
+    });
+
+    // Filter documents with score > 0 and sort by relevance
+    const matchingDocuments = scoredDocuments
+      .filter(doc => doc.relevance_score > 0)
+      .sort((a, b) => b.relevance_score - a.relevance_score);
+
+    return matchingDocuments;
+  } catch (error) {
+    console.error('Error searching documents:', error);
+    throw new Error(`Failed to search documents: ${error.message}`);
+  }
+};
+
+/**
+ * Get document statistics for an agent
+ *
+ * @param {string} agentId - Agent ID
+ * @returns {Promise<Object>} Statistics object
+ */
+export const getDocumentStats = async (agentId) => {
+  try {
+    if (!agentId) {
+      throw new Error('Agent ID is required');
+    }
+
+    const documents = await listDocuments(agentId);
+
+    const stats = {
+      total_documents: documents.length,
+      total_size_kb: 0,
+      total_size_mb: 0,
+      by_format: {},
+      by_category: {},
+      most_shared: null,
+      recently_uploaded: documents.slice(0, 5)
+    };
+
+    documents.forEach(doc => {
+      // Total size
+      stats.total_size_kb += doc.size_kb || 0;
+
+      // By format
+      const format = doc.format || 'unknown';
+      stats.by_format[format] = (stats.by_format[format] || 0) + 1;
+
+      // By category
+      const category = doc.category || 'other';
+      stats.by_category[category] = (stats.by_category[category] || 0) + 1;
+
+      // Most shared
+      if (!stats.most_shared || (doc.share_count || 0) > (stats.most_shared.share_count || 0)) {
+        stats.most_shared = doc;
+      }
+    });
+
+    stats.total_size_mb = Math.round((stats.total_size_kb / 1024) * 100) / 100;
+
+    return stats;
+  } catch (error) {
+    console.error('Error getting document stats:', error);
+    throw new Error(`Failed to get document stats: ${error.message}`);
+  }
+};
+
+/**
+ * Helper: Get MIME type from format
+ */
+export const getMimeType = (format) => {
+  const mimeTypes = {
+    'pdf': 'application/pdf',
+    'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'doc': 'application/msword',
+    'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'xls': 'application/vnd.ms-excel',
+    'csv': 'text/csv',
+    'txt': 'text/plain',
+    'jpg': 'image/jpeg',
+    'jpeg': 'image/jpeg',
+    'png': 'image/png',
+    'gif': 'image/gif',
+    'mp4': 'video/mp4',
+    'mp3': 'audio/mpeg',
+    'zip': 'application/zip',
+    'rar': 'application/x-rar-compressed'
+  };
+
+  return mimeTypes[format.toLowerCase()] || 'application/octet-stream';
+};
+
+/**
+ * Helper: Format file size for display
+ */
+export const formatFileSize = (sizeKb) => {
+  if (sizeKb < 1024) {
+    return `${sizeKb} KB`;
+  } else {
+    const sizeMb = (sizeKb / 1024).toFixed(2);
+    return `${sizeMb} MB`;
+  }
+};
+
+/**
+ * Helper: Get icon name for format
+ */
+export const getFormatIcon = (format) => {
+  const iconMap = {
+    'pdf': 'PictureAsPdf',
+    'docx': 'Description',
+    'doc': 'Description',
+    'xlsx': 'TableChart',
+    'xls': 'TableChart',
+    'csv': 'TableChart',
+    'txt': 'Description',
+    'jpg': 'Image',
+    'jpeg': 'Image',
+    'png': 'Image',
+    'gif': 'Image',
+    'mp4': 'VideoFile',
+    'mp3': 'AudioFile',
+    'zip': 'FolderZip',
+    'rar': 'FolderZip'
+  };
+
+  return iconMap[format.toLowerCase()] || 'InsertDriveFile';
+};
+
+const DocumentService = {
+  uploadDocument,
+  listDocuments,
+  getDocument,
+  updateDocument,
+  deleteDocument,
+  searchDocuments,
+  getDocumentStats,
+  getMimeType,
+  formatFileSize,
+  getFormatIcon
+};
+
+export default DocumentService;

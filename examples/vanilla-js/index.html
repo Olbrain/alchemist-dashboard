@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dashboard Embed - Vanilla JS Example</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+
+    header {
+      padding: 1rem;
+      background-color: #1976d2;
+      color: white;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .container {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    aside {
+      width: 200px;
+      padding: 1rem;
+      background-color: #f5f5f5;
+      border-right: 1px solid #ddd;
+    }
+
+    aside ul {
+      list-style: none;
+      padding: 0;
+    }
+
+    aside li {
+      padding: 0.5rem;
+      margin-bottom: 0.25rem;
+      cursor: pointer;
+      border-radius: 4px;
+    }
+
+    aside li:hover {
+      background-color: #e0e0e0;
+    }
+
+    aside li.active {
+      background-color: #1976d2;
+      color: white;
+    }
+
+    main {
+      flex: 1;
+      overflow: auto;
+      padding: 1rem;
+    }
+
+    #dashboard-root {
+      width: 100%;
+      height: 100%;
+    }
+
+    .loading {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100%;
+      font-size: 1.2rem;
+      color: #666;
+    }
+  </style>
+</head>
+<body>
+  <!-- Sinch Platform Layout -->
+  <header>
+    <h1>Sinch Platform (Vanilla JS)</h1>
+    <div>
+      <span id="user-email">user@sinch.com</span>
+    </div>
+  </header>
+
+  <div class="container">
+    <!-- Sidebar -->
+    <aside>
+      <h3>Navigation</h3>
+      <ul>
+        <li class="active" onclick="navigateTo('dashboard')">Dashboard</li>
+        <li onclick="navigateTo('messages')">Messages</li>
+        <li onclick="navigateTo('agents')">AI Agents</li>
+        <li onclick="navigateTo('settings')">Settings</li>
+      </ul>
+    </aside>
+
+    <!-- Main content area -->
+    <main>
+      <div id="dashboard-root">
+        <div class="loading">Loading Dashboard...</div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Load React and ReactDOM from CDN -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+  <!-- Load Dashboard from CDN (Module Federation remoteEntry) -->
+  <script src="https://cdn.yourcompany.com/remoteEntry.js"></script>
+
+  <script>
+    // Sinch's user data (from their auth system)
+    const sinchUser = {
+      uid: 'sinch-user-123',
+      email: 'user@sinch.com',
+      displayName: 'John Doe',
+    };
+
+    const sinchToken = 'sinch-auth-token-xyz';
+
+    // Initialize dashboard when script loads
+    window.addEventListener('DOMContentLoaded', () => {
+      // Access the Module Federation container
+      window.projectDashboard.get('./DashboardCore').then((module) => {
+        const DashboardCore = module.default;
+        const container = document.getElementById('dashboard-root');
+
+        // Create React element
+        const dashboardElement = React.createElement(DashboardCore, {
+          apiUrl: 'https://api.sinch.io',
+          authToken: sinchUser,
+          onNavigate: (location) => {
+            console.log('Dashboard navigated to:', location.pathname);
+          },
+          theme: 'light',
+          config: {
+            deploymentType: 'docker',
+          },
+          initialPath: '/',
+        });
+
+        // Render to DOM
+        ReactDOM.createRoot(container).render(dashboardElement);
+      }).catch((error) => {
+        console.error('Failed to load dashboard:', error);
+        document.getElementById('dashboard-root').innerHTML =
+          '<div class="loading">Failed to load dashboard. Please refresh.</div>';
+      });
+    });
+
+    // Navigation handler (example)
+    function navigateTo(section) {
+      console.log('Navigate to:', section);
+      // Update active state
+      document.querySelectorAll('aside li').forEach(li => {
+        li.classList.remove('active');
+      });
+      event.target.classList.add('active');
+
+      // You could update dashboard path here if needed
+      // or handle navigation in your own way
+    }
+  </script>
+</body>
+</html>

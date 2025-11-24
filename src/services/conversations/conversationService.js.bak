@@ -1,0 +1,1474 @@
+/**
+ * Conversation Service
+ * 
+ * Handles conversation-related API operations including billing tracking for deployed agents
+ */
+import { AGENT_ENGINE_URL, api, agentBuilderApi } from '../config/apiConfig';
+import { logActivity } from '../activity/activityService';
+import { getCurrentUser } from '../context';
+import { AGENT_ACTIVITIES, RESOURCE_TYPES, ACTIVITY_SEVERITY } from '../../constants/activityTypes';
+import {
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  query,
+  where,
+  orderBy,
+  limit,
+  onSnapshot,
+  serverTimestamp
+} from 'firebase/firestore';
+import { db } from '../../utils/firebase';
+
+/**
+ * Get conversations for an agent
+ */
+export const getAgentConversations = async (agentId) => {
+  try {
+    // Use the configured axios instance which has auth interceptors
+    const endpoint = `/agents/${agentId}/conversations`;
+    
+    console.log('Making request to agent API:', endpoint);
+    
+    const response = await api.get(endpoint);
+    console.log('API response for conversations:', response.data);
+    return response.data.conversations || [];
+  } catch (error) {
+    // Handle 405 Method Not Allowed - this endpoint might not exist or be disabled
+    if (error.response?.status === 405) {
+      console.warn(`Conversations endpoint not available for agent ${agentId} (405), returning empty conversations`);
+      return [];
+    }
+    console.error(`Error getting conversations for agent ${agentId}:`, error);
+    throw error;
+  }
+};
+
+/**
+ * Get messages for a specific conversation
+ */
+export const getConversationMessages = async (conversationId) => {
+  try {
+    // Use the configured axios instance which has auth interceptors
+    const endpoint = `/conversations/${conversationId}/messages`;
+    
+    console.log('Making request to agent API:', endpoint);
+    
+    const response = await api.get(endpoint);
+    console.log('API response for conversation messages:', response.data);
+    return response.data.messages || [];
+  } catch (error) {
+    console.error(`Error getting messages for conversation ${conversationId}:`, error);
+    throw error;
+  }
+};
+
+/**
+ * Create a new conversation
+ */
+export const createConversation = async (agentId, conversationData) => {
+  try {
+    // Use the configured axios instance which has auth interceptors
+    const endpoint = `/agents/${agentId}/conversations`;
+    
+    console.log('Making request to agent API:', endpoint);
+    
+    const response = await api.post(endpoint, conversationData);
+    console.log('API response for creating conversation:', response.data);
+    return response.data;
+  } catch (error) {
+    console.error(`Error creating conversation for agent ${agentId}:`, error);
+    throw error;
+  }
+};
+
+/**
+ * Delete a conversation
+ */
+export const deleteConversation = async (conversationId) => {
+  try {
+    // Use the configured axios instance which has auth interceptors
+    const endpoint = `/conversations/${conversationId}`;
+    
+    console.log('Making request to agent API:', endpoint);
+    
+    const response = await api.delete(endpoint);
+    console.log('API response for deleting conversation:', response.data);
+    return response.data;
+  } catch (error) {
+    console.error(`Error deleting conversation ${conversationId}:`, error);
+    throw error;
+  }
+};
+
+// ============================================================================
+// PRE-DEPLOYMENT TESTING (FREE - NO BILLING)
+// ============================================================================
+
+/**
+ * Save pre-deployment test conversation (for development testing)
+ */
+export const saveTestConversation = async ({ agentId, conversationId, message, response, timestamp }) => {
+  try {
+    // Use backend API to save test conversation
+    await agentBuilderApi.post('/api/conversations/test', {
+      agent_id: agentId,
+      conversation_id: conversationId,
+      message,
+      response,
+      timestamp: timestamp || null
+    });
+
+    console.log('Test conversation saved via backend API:', conversationId);
+  } catch (error) {
+    console.error('Error saving test conversation:', error);
+    // Don't throw error - pre-deployment testing should continue even if logging fails
+  }
+};
+
+/**
+ * Get pre-deployment test conversation history
+ * Returns individual test messages instead of conversation pairs for better visibility
+ */
+export const getTestConversationHistory = async (agentId, options = {}) => {
+  try {
+    const { limit: limitCount = 50 } = options;
+
+    console.log(`🔥 Getting test messages from agent sessions for agent: ${agentId}`);
+
+    // First, get sessions for this agent
+    const sessions = await getSessionsForAgent(agentId, { limit: 20 });
+    if (sessions.length === 0) {
+      console.log('⚠️ No sessions found for agent');
+      return [];
+    }
+
+    // Collect messages from all sessions
+    const allMessages = [];
+    for (const session of sessions) {
+      try {
+        const sessionMessages = await getMessagesForSession(session.session_id, agentId);
+        allMessages.push(...sessionMessages.map(msg => ({
+          ...msg,
+          isProduction: false, // Mark as test/development
+          deploymentType: 'pre-deployment'
+        })));
+      } catch (error) {
+        console.warn(`Failed to get messages for session ${session.session_id}:`, error);
+      }
+    }
+
+    // Sort all messages by timestamp (most recent first) and limit
+    allMessages.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    const limitedMessages = allMessages.slice(0, limitCount);
+
+    console.log(`✅ Retrieved ${limitedMessages.length} test messages from ${sessions.length} sessions`);
+    return limitedMessages;
+    
+  } catch (error) {
+    console.error('Error getting test messages from agent sessions:', error);
+    throw error; // Re-throw to allow proper error handling upstream
+  }
+};
+
+// ============================================================================
+// DEPLOYED AGENT TESTING WITH BILLING TRACKING
+// ============================================================================
+
+/**
+ * Create a new conversation with a deployed agent
+ */
+export const createDeployedAgentConversation = async (agentId, userId = 'test-user') => {
+  try {
+    const agentEndpoint = await getAgentEndpoint(agentId);
+    
+    const response = await fetch(`${agentEndpoint}/api/conversation/create`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${await getAuthToken()}`
+      },
+      body: JSON.stringify({
+        user_id: userId
+      })
+    });
+
+    if (!response.ok) {
+      // Try to extract detailed error message from response
+      let errorMessage = `HTTP error! status: ${response.status}`;
+      try {
+        const errorData = await response.json();
+        if (errorData.detail) {
+          errorMessage = `${errorData.detail} (HTTP ${response.status})`;
+        } else if (errorData.message) {
+          errorMessage = `${errorData.message} (HTTP ${response.status})`;
+        }
+      } catch (parseError) {
+        // If we can't parse the error response, use the status text
+        errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+      }
+      throw new Error(errorMessage);
+    }
+
+    const data = await response.json();
+    return data.conversation_id;
+  } catch (error) {
+    console.error('Error creating conversation with deployed agent:', error);
+    throw new Error(error.message || 'Failed to create conversation');
+  }
+};
+
+// Non-streaming API removed - deployed agents now use streaming only
+
+/**
+ * Send a streaming message to a deployed agent
+ */
+export const sendStreamingMessageToDeployedAgent = async ({ 
+  agentId, 
+  conversationId, 
+  message, 
+  testMode = 'production', 
+  onChunk, 
+  onComplete 
+}) => {
+  try {
+    const agentEndpoint = await getAgentEndpoint(agentId);
+    
+    const response = await fetch(`${agentEndpoint}/api/conversation/message/stream`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${await getAuthToken()}`
+      },
+      body: JSON.stringify({
+        conversation_id: conversationId,
+        message: message,
+        user_id: 'test-user'
+      })
+    });
+
+    if (!response.ok) {
+      // Try to extract detailed error message from response
+      let errorMessage = `HTTP error! status: ${response.status}`;
+      try {
+        const errorData = await response.json();
+        if (errorData.detail) {
+          errorMessage = `${errorData.detail} (HTTP ${response.status})`;
+        } else if (errorData.message) {
+          errorMessage = `${errorData.message} (HTTP ${response.status})`;
+        }
+      } catch (parseError) {
+        // If we can't parse the error response, use the status text
+        errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+      }
+      throw new Error(errorMessage);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let fullResponse = '';
+    let tokens = { prompt: 0, completion: 0, total: 0 };
+    let cost = 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      
+      if (done) break;
+
+      const chunk = decoder.decode(value);
+      const lines = chunk.split('\n');
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const data = line.slice(6).trim();
+          
+          if (data === '[DONE]') {
+            // Streaming complete
+            if (testMode === 'production') {
+              await saveBillableMessage({
+                agentId,
+                conversationId,
+                message,
+                response: fullResponse,
+                tokens,
+                cost,
+                timestamp: serverTimestamp(),
+                testMode
+              });
+            }
+            
+            if (onComplete) {
+              onComplete(tokens, cost);
+            }
+            return;
+          }
+
+          try {
+            const parsed = JSON.parse(data);
+            
+            if (parsed.type === 'content') {
+              fullResponse += parsed.content;
+              if (onChunk) {
+                onChunk(parsed.content);
+              }
+            } else if (parsed.type === 'tokens') {
+              tokens = parsed.tokens;
+              cost = calculateCost(tokens);
+            }
+          } catch (parseError) {
+            // Handle non-JSON chunks
+            if (data && data !== '') {
+              fullResponse += data;
+              if (onChunk) {
+                onChunk(data);
+              }
+            }
+          }
+        }
+      }
+    }
+
+  } catch (error) {
+    console.error('Error in streaming message:', error);
+    throw new Error('Failed to send streaming message');
+  }
+};
+
+/**
+ * Get the endpoint URL for a deployed agent
+ */
+const getAgentEndpoint = async (agentId) => {
+  try {
+    // Get agent server info from agent_servers collection (new schema)
+    const agentServerDoc = doc(db, 'agent_servers', agentId);
+    const docSnapshot = await getDoc(agentServerDoc);
+    
+    if (!docSnapshot.exists()) {
+      throw new Error('Agent server not found - agent may not be deployed');
+    }
+    
+    const serverData = docSnapshot.data();
+    
+    if (!serverData.service_url || serverData.status !== 'active') {
+      throw new Error(`Agent server not active (status: ${serverData.status || 'unknown'})`);
+    }
+    
+    console.log(`Agent endpoint retrieved from agent_servers: ${serverData.service_url}`);
+    return serverData.service_url;
+  } catch (error) {
+    console.error('Error getting agent endpoint from agent_servers:', error);
+    throw error;
+  }
+};
+
+/**
+ * Save conversation message interaction to backend
+ */
+const saveBillableMessage = async ({ agentId, conversationId, message, response, tokens, cost, timestamp, testMode = 'production' }) => {
+  try {
+    // Use backend API to save billable message
+    await agentBuilderApi.post('/api/conversations/billable', {
+      agent_id: agentId,
+      conversation_id: conversationId,
+      message,
+      response,
+      tokens: {
+        prompt_tokens: tokens?.prompt_tokens || tokens?.prompt || 0,
+        completion_tokens: tokens?.completion_tokens || tokens?.completion || 0,
+        total_tokens: tokens?.total_tokens || tokens?.total || 0
+      },
+      cost: cost || 0,
+      test_mode: testMode,
+      timestamp: timestamp || null
+    });
+
+    console.log('Billable message saved via backend API:', conversationId);
+  } catch (error) {
+    console.error('Error saving billable message:', error);
+    // Don't throw error here as it shouldn't block the conversation
+  }
+};
+
+/**
+ * Get billing information for an agent
+ */
+export const getBillingInfo = async (agentId) => {
+  try {
+    // Use backend API to get billing info
+    const response = await agentBuilderApi.get(`/api/conversations/billing/${agentId}`);
+
+    return {
+      totalMessages: response.data.total_messages || 0,
+      totalTokens: response.data.total_tokens || 0,
+      estimatedCost: response.data.estimated_cost || 0,
+      sessionCost: response.data.session_cost || 0,
+      lastBillableAction: response.data.last_billable_action || null
+    };
+  } catch (error) {
+    console.error('Error getting billing info:', error);
+    return {
+      totalMessages: 0,
+      totalTokens: 0,
+      estimatedCost: 0,
+      sessionCost: 0,
+      lastBillableAction: null
+    };
+  }
+};
+
+/**
+ * Save conversation session summary
+ */
+export const saveBillingSession = async ({ agentId, conversationId, messages, totalTokens, totalCost, testMode, endedAt }) => {
+  try {
+    // Use backend API to save billing session
+    await agentBuilderApi.post('/api/conversations/billing-session', {
+      agent_id: agentId,
+      conversation_id: conversationId,
+      messages,
+      total_tokens: totalTokens,
+      total_cost: totalCost,
+      test_mode: testMode,
+      ended_at: endedAt || null
+    });
+
+    console.log('Billing session saved via backend API:', conversationId);
+  } catch (error) {
+    console.error('Error saving billing session:', error);
+  }
+};
+
+/**
+ * Get conversation history from Firestore using agent sessions
+ * Returns individual messages instead of conversation pairs for better visibility
+ */
+export const getConversationHistoryFromFirestore = async (agentId, options = {}) => {
+  try {
+    const { limit: limitCount = 50 } = options;
+
+    console.log(`🔥 Getting conversation history from agent sessions for agent: ${agentId}`);
+
+    // First, get sessions for this agent
+    const sessions = await getSessionsForAgent(agentId, { limit: 20 });
+    if (sessions.length === 0) {
+      console.log('⚠️ No sessions found for agent');
+      return [];
+    }
+
+    // Collect messages from all sessions
+    const allMessages = [];
+    for (const session of sessions) {
+      try {
+        const sessionMessages = await getMessagesForSession(session.session_id, agentId);
+        allMessages.push(...sessionMessages.map(msg => ({
+          ...msg,
+          isProduction: true, // Assume production unless specified
+          deploymentType: 'production'
+        })));
+      } catch (error) {
+        console.warn(`Failed to get messages for session ${session.session_id}:`, error);
+      }
+    }
+
+    // Sort all messages by timestamp (most recent first) and limit
+    allMessages.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    const limitedMessages = allMessages.slice(0, limitCount);
+
+    console.log(`✅ Retrieved ${limitedMessages.length} messages from ${sessions.length} sessions`);
+    console.log(`🔍 Sample message:`, limitedMessages[0] || 'No messages');
+
+    return limitedMessages;
+
+  } catch (error) {
+    console.error('Error getting messages from agent sessions:', error);
+    throw error; // Re-throw to allow proper error handling upstream
+  }
+};
+
+/**
+ * Get conversation history for billing/analytics
+ */
+export const getConversationHistory = async (agentId, options = {}) => {
+  try {
+    // Use Firestore implementation
+    return await getConversationHistoryFromFirestore(agentId, options);
+  } catch (error) {
+    console.error('Error getting conversation history:', error);
+    return [];
+  }
+};
+
+/**
+ * Get billing analytics for an agent
+ */
+export const getBillingAnalytics = async (agentId, timeframe = '30days') => {
+  try {
+    const endDate = new Date();
+    const startDate = new Date();
+    
+    switch (timeframe) {
+      case '24hours':
+        startDate.setHours(startDate.getHours() - 24);
+        break;
+      case '7days':
+        startDate.setDate(startDate.getDate() - 7);
+        break;
+      case '30days':
+        startDate.setDate(startDate.getDate() - 30);
+        break;
+      default:
+        startDate.setDate(startDate.getDate() - 30);
+    }
+
+    const conversations = await getConversationHistory(agentId, {
+      limit: 1000,
+      startDate: startDate.toISOString(),
+      endDate: endDate.toISOString()
+    });
+
+    // Calculate analytics
+    const analytics = {
+      totalConversations: conversations.length,
+      totalMessages: conversations.length,
+      totalTokens: conversations.reduce((sum, conv) => sum + (conv.tokens?.total || 0), 0),
+      totalCost: conversations.reduce((sum, conv) => sum + (conv.cost || 0), 0),
+      averageTokensPerMessage: 0,
+      averageCostPerMessage: 0,
+      dailyBreakdown: {}
+    };
+
+    if (analytics.totalMessages > 0) {
+      analytics.averageTokensPerMessage = Math.round(analytics.totalTokens / analytics.totalMessages);
+      analytics.averageCostPerMessage = analytics.totalCost / analytics.totalMessages;
+    }
+
+    // Group by day for daily breakdown
+    conversations.forEach(conv => {
+      const date = new Date(conv.timestamp).toDateString();
+      if (!analytics.dailyBreakdown[date]) {
+        analytics.dailyBreakdown[date] = {
+          messages: 0,
+          tokens: 0,
+          cost: 0
+        };
+      }
+      analytics.dailyBreakdown[date].messages += 1;
+      analytics.dailyBreakdown[date].tokens += conv.tokens?.total || 0;
+      analytics.dailyBreakdown[date].cost += conv.cost || 0;
+    });
+
+    return analytics;
+  } catch (error) {
+    console.error('Error getting billing analytics:', error);
+    return {
+      totalConversations: 0,
+      totalMessages: 0,
+      totalTokens: 0,
+      totalCost: 0,
+      averageTokensPerMessage: 0,
+      averageCostPerMessage: 0,
+      dailyBreakdown: {}
+    };
+  }
+};
+
+/**
+ * Subscribe to real-time billing updates
+ */
+export const subscribeToBillingUpdates = (agentId, callback) => {
+  try {
+    const summaryRef = doc(db, 'agent_usage_summary', agentId);
+    
+    return onSnapshot(summaryRef, (doc) => {
+      if (doc.exists()) {
+        const data = doc.data();
+        callback({
+          totalMessages: data.totalMessages || 0,
+          totalTokens: data.totalTokens || 0,
+          estimatedCost: data.totalCost || 0,
+          lastBillableAction: data.lastActivity?.toDate?.()?.toISOString() || null
+        });
+      }
+    });
+  } catch (error) {
+    console.error('Error subscribing to billing updates:', error);
+    return () => {}; // Return empty unsubscribe function
+  }
+};
+
+/**
+ * Calculate cost based on token usage
+ * Using standard GPT-4 pricing as baseline
+ */
+const calculateCost = (tokens) => {
+  if (!tokens) return 0;
+  
+  const promptTokens = tokens.prompt_tokens || tokens.prompt || 0;
+  const completionTokens = tokens.completion_tokens || tokens.completion || 0;
+  
+  // GPT-4 pricing (per 1K tokens)
+  const promptCostPer1K = 0.03;   // $0.03 per 1K prompt tokens
+  const completionCostPer1K = 0.06; // $0.06 per 1K completion tokens
+  
+  const promptCost = (promptTokens / 1000) * promptCostPer1K;
+  const completionCost = (completionTokens / 1000) * completionCostPer1K;
+  
+  return promptCost + completionCost;
+};
+
+/**
+ * Get authentication token for API calls
+ */
+const getAuthToken = async () => {
+  try {
+    // Get the current user from Firebase auth
+    const currentUser = getCurrentUser();
+    if (currentUser) {
+      // Get the ID token from Firebase
+      const token = await currentUser.getIdToken();
+      return token;
+    }
+    // Return null if no user is logged in
+    return null;
+  } catch (error) {
+    console.error('Error getting auth token:', error);
+    return null;
+  }
+};
+
+/**
+ * Test agent endpoint availability
+ */
+export const testAgentEndpoint = async (agentId) => {
+  try {
+    const agentEndpoint = await getAgentEndpoint(agentId);
+    const response = await fetch(`${agentEndpoint}/health`);
+    
+    if (!response.ok) {
+      // Try to extract detailed error message from response
+      let errorMessage = `Health check failed with HTTP ${response.status}`;
+      try {
+        const errorData = await response.json();
+        if (errorData.detail) {
+          errorMessage = `Health check failed: ${errorData.detail}`;
+        } else if (errorData.message) {
+          errorMessage = `Health check failed: ${errorData.message}`;
+        }
+      } catch (parseError) {
+        // If we can't parse the error response, use the status text
+        errorMessage = `Health check failed: HTTP ${response.status} ${response.statusText}`;
+      }
+      throw new Error(errorMessage);
+    }
+    
+    const data = await response.json();
+    
+    // Log successful agent endpoint test activity
+    try {
+      await logActivity({
+        activity_type: AGENT_ACTIVITIES.TEST_COMPLETED,
+        resource_type: RESOURCE_TYPES.AGENT,
+        resource_id: agentId,
+        activity_details: {
+          agent_id: agentId,
+          test_type: 'endpoint_health_check',
+          status: data.status,
+          version: data.version,
+          last_deployed: data.deployed_at,
+          available: true
+        }
+      });
+    } catch (logError) {
+      console.error('Failed to log agent endpoint test activity:', logError);
+    }
+    
+    return {
+      available: true,
+      status: data.status,
+      version: data.version,
+      lastDeployed: data.deployed_at
+    };
+  } catch (error) {
+    // Log failed agent endpoint test activity
+    try {
+      await logActivity({
+        activity_type: AGENT_ACTIVITIES.TEST_FAILED,
+        resource_type: RESOURCE_TYPES.AGENT,
+        resource_id: agentId,
+        severity: ACTIVITY_SEVERITY.ERROR,
+        activity_details: {
+          agent_id: agentId,
+          test_type: 'endpoint_health_check',
+          error_message: error.message,
+          available: false
+        }
+      });
+    } catch (logError) {
+      console.error('Failed to log agent endpoint test failure activity:', logError);
+    }
+    
+    return {
+      available: false,
+      error: error.message
+    };
+  }
+};
+
+// ============================================================================
+// REAL-TIME FIRESTORE CONVERSATION MANAGEMENT
+// ============================================================================
+
+/**
+ * Subscribe to real-time conversation messages for Alchemist
+ * Listens to alchemist_conversations/{user_id}/messages collection
+ */
+export const subscribeToAgentConversations = (userId, onMessagesUpdate, onError) => {
+  try {
+    console.log(`🔥 Setting up real-time conversation listener for user: ${userId}`);
+
+    const messagesRef = collection(db, `alchemist_conversations/${userId}/messages`);
+    const q = query(messagesRef, orderBy('created_at', 'asc'));
+
+    return onSnapshot(q, async (snapshot) => {
+      console.log(`📨 Real-time update: ${snapshot.docs.length} messages for user ${userId}`);
+
+      const messages = [];
+      let lastUserMessageTimestamp = null;
+
+      // Process messages and calculate response times
+      for (const doc of snapshot.docs) {
+        const data = doc.data();
+        console.log(`🔍 Message document ${doc.id}:`, data);
+
+        // Handle timestamp conversion
+        let timestamp = data.created_at;
+        if (timestamp?.toDate) {
+          timestamp = timestamp.toDate();
+        } else if (timestamp?.seconds) {
+          timestamp = new Date(timestamp.seconds * 1000 + (timestamp.nanoseconds || 0) / 1000000);
+        } else if (typeof timestamp === 'string') {
+          timestamp = new Date(timestamp);
+        } else {
+          timestamp = new Date();
+        }
+
+        const message = {
+          id: doc.id,
+          role: data.role || 'user',
+          content: data.content || '',
+          attachments: data.attachments || [],
+          timestamp,
+          sent_timestamp: data.sent_timestamp,
+          response_time: data.response_time || 0,
+          metadata: data.metadata || {}
+        };
+
+        // Calculate response time for agent messages if not already calculated
+        if (data.role === 'assistant' && !data.response_time && lastUserMessageTimestamp) {
+          const responseTime = timestamp.getTime() - lastUserMessageTimestamp;
+          console.log(`⏱️ Calculated response time: ${responseTime}ms`);
+
+          // Set response time in message object for display
+          message.response_time = responseTime;
+        }
+
+        // Track the last user message timestamp for response time calculation
+        if (data.role === 'user' && data.sent_timestamp) {
+          lastUserMessageTimestamp = data.sent_timestamp;
+        }
+
+        messages.push(message);
+      }
+
+      console.log(`✅ Processed ${messages.length} messages for real-time update`);
+      onMessagesUpdate(messages);
+    }, (error) => {
+      console.error('❌ Real-time conversation subscription error:', error);
+      if (onError) onError(error);
+    });
+  } catch (error) {
+    console.error('❌ Error setting up conversation subscription:', error);
+    if (onError) onError(error);
+    return () => {}; // Return empty unsubscribe function
+  }
+};
+
+/**
+ * Send a user message via HTTP API
+ * The API will handle storing messages in Firestore and processing with orchestrator
+ * All Alchemist conversations are now user-scoped
+ * @param {string} userId - The user ID for the conversation
+ * @param {string} message - The message content
+ * @param {Array} attachments - Optional attachments
+ */
+export const sendMessageToAPI = async (userId, message, attachments = null, projectId = null) => {
+  try {
+    console.log(`📤 Sending message to API for user ${userId}:`, message);
+    if (attachments) {
+      console.log(`📎 With ${attachments.length} attachments`);
+    }
+    if (projectId) {
+      console.log(`📁 With project context: ${projectId}`);
+    }
+
+    // Get auth token (optional for now)
+    const token = await getAuthToken();
+
+    // Authentication is optional for both local and deployed backends
+    // Log if no token but don't fail
+    if (!token) {
+      console.log('📝 No auth token available, proceeding without authentication');
+    }
+
+    // Prepare request data
+    // Backend expects user_id for all Alchemist conversations
+    const requestData = {
+      user_id: userId,
+      message: message,
+      attachments: attachments || [],
+      project_id: projectId,
+      source: 'project-dashboard'
+    };
+
+    // Prepare headers
+    const headers = {
+      'Content-Type': 'application/json'
+    };
+
+    // Add authorization header only if token is available
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+
+    // Call the HTTP API endpoint
+    const response = await fetch(`${AGENT_ENGINE_URL}/api/alchemist/interact`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(requestData)
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.message || `HTTP error! status: ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    console.log(`✅ Message processed successfully`);
+    console.log(`📊 Response includes tracker:`, data.tracker ? 'Yes' : 'No');
+
+    return data;
+  } catch (error) {
+    console.error('❌ Error sending message to API:', error);
+    throw error;
+  }
+};
+
+/**
+ * Store user message directly to Firestore with attachments and sent timestamp
+ * This ensures the user message with attachments is immediately visible in the conversation
+ * @param {string} userId - The user ID
+ * @param {string} message - The message content
+ * @param {Array} attachments - Optional attachments
+ * @param {number} sentTimestamp - Optional timestamp when message was sent (for response time tracking)
+ */
+export const storeUserMessageToFirestore = async (userId, message, attachments = null, sentTimestamp = null) => {
+  try {
+    console.log(`📝 Storing user message via backend API for user ${userId}:`, message);
+    if (attachments && attachments.length > 0) {
+      console.log(`📎 With ${attachments.length} attachments:`, attachments);
+    }
+    if (sentTimestamp) {
+      console.log(`⏱️ With sent timestamp for response tracking: ${sentTimestamp}`);
+    }
+
+    // Use backend API to store user message
+    const response = await agentBuilderApi.post('/api/conversations/alchemist/messages', {
+      user_id: userId,
+      message,
+      attachments: attachments || [],
+      sent_timestamp: sentTimestamp || Date.now()
+    });
+
+    console.log(`✅ User message stored via backend API with ID: ${response.data.message_id}`);
+    return response.data.message_id;
+  } catch (error) {
+    console.error('❌ Error storing user message:', error);
+    throw error;
+  }
+};
+
+/**
+ * Send a user message to Firestore (DEPRECATED - Use sendMessageToAPI instead)
+ * Kept for backward compatibility during migration
+ */
+export const sendUserMessage = async (agentId, message, attachments = null) => {
+  console.warn('⚠️ sendUserMessage is deprecated. Use sendMessageToAPI instead.');
+  return sendMessageToAPI(agentId, message, attachments);
+};
+
+/**
+ * Initialize conversation session for Alchemist
+ * Creates the alchemist_conversations/{user_id} document if it doesn't exist
+ */
+export const initializeConversationSession = async (userId) => {
+  try {
+    console.log(`🔧 Initializing conversation session via backend API for user: ${userId}`);
+
+    // Use backend API to initialize conversation session
+    await agentBuilderApi.post('/api/conversations/alchemist/sessions/initialize', {
+      user_id: userId
+    });
+
+    console.log(`✅ Conversation session initialized via backend API for user ${userId}`);
+  } catch (error) {
+    console.error('❌ Error initializing conversation session:', error);
+    // Don't throw error - session creation is not critical
+  }
+};
+
+/**
+ * Subscribe to conversation statistics (message count and token usage)
+ * @param {string} userId - The user ID
+ * @param {Function} onUpdate - Callback when statistics update
+ * @param {Function} onError - Callback for errors
+ * @returns {Function} Unsubscribe function
+ */
+export const subscribeToConversationStatistics = (userId, onUpdate, onError) => {
+  try {
+    console.log(`📊 Setting up statistics listener for user: ${userId}`);
+
+    const sessionRef = doc(db, `alchemist_conversations/${userId}`);
+
+    return onSnapshot(sessionRef, (snapshot) => {
+      if (snapshot.exists()) {
+        const data = snapshot.data();
+        const stats = data.message_statistics || {
+          total_messages: 0,
+          total_tokens_used: 0
+        };
+
+        console.log(`📈 Statistics update for user ${userId}:`, stats);
+
+        onUpdate({
+          totalMessages: stats.total_messages || 0,
+          totalTokens: stats.total_tokens_used || 0,
+          messageCount: data.message_count || 0, // Legacy field
+          lastActivity: data.last_activity?.toDate?.()?.toISOString() || null
+        });
+      } else {
+        // Document doesn't exist yet, return default values
+        onUpdate({
+          totalMessages: 0,
+          totalTokens: 0,
+          messageCount: 0,
+          lastActivity: null
+        });
+      }
+    }, (error) => {
+      console.error(`❌ Error in statistics listener for user ${userId}:`, error);
+      onError(error);
+    });
+  } catch (error) {
+    console.error('Error setting up statistics listener:', error);
+    onError(error);
+    return () => {}; // Return empty unsubscribe function
+  }
+};
+
+/**
+ * Clear conversation history for Alchemist
+ * Deletes all messages in alchemist_conversations/{user_id}/messages
+ */
+export const clearConversationHistory = async (userId) => {
+  try {
+    console.log(`🗑️ Clearing conversation history via backend API for user: ${userId}`);
+
+    // Use backend API to clear conversation history
+    const response = await agentBuilderApi.delete('/api/conversations/alchemist/sessions/clear', {
+      data: { user_id: userId }
+    });
+
+    console.log(`✅ ${response.data.message} for user ${userId}`);
+
+    // Log successful conversation clearing activity
+    try {
+      await logActivity({
+        activity_type: AGENT_ACTIVITIES.CONVERSATION_CLEARED,
+        resource_type: RESOURCE_TYPES.CONVERSATION,
+        resource_id: userId,
+        related_resource_type: RESOURCE_TYPES.USER,
+        related_resource_id: userId,
+        activity_details: {
+          user_id: userId,
+          action: 'cleared_conversation_history'
+        }
+      });
+    } catch (logError) {
+      console.error('Failed to log conversation clearing activity:', logError);
+    }
+    
+  } catch (error) {
+    console.error('❌ Error clearing conversation history:', error);
+    
+    // Log conversation clearing failure activity
+    try {
+      await logActivity({
+        activity_type: AGENT_ACTIVITIES.CONVERSATION_CLEAR_FAILED,
+        resource_type: RESOURCE_TYPES.CONVERSATION,
+        resource_id: userId,
+        related_resource_type: RESOURCE_TYPES.USER,
+        related_resource_id: userId,
+        severity: ACTIVITY_SEVERITY.ERROR,
+        activity_details: {
+          user_id: userId,
+          error_message: error.message,
+          action: 'clear_conversation_failed'
+        }
+      });
+    } catch (logError) {
+      console.error('Failed to log conversation clearing failure activity:', logError);
+    }
+    
+    throw error;
+  }
+};
+
+// ============================================================================
+// DIRECT FIRESTORE MESSAGE QUERIES FOR CONVERSATION HISTORY
+// ============================================================================
+
+/**
+ * Get session messages directly from agent_sessions/{sessionId}/messages subcollection
+ * This fixes the frontend conversation history to read from where messages are actually stored
+ */
+export const getSessionMessagesFromFirestore = async (sessionId, organizationId, options = {}) => {
+  try {
+    const { limit: limitCount = 50 } = options;
+
+    console.log(`🔥 Getting session messages from agent_sessions/${sessionId}/messages`);
+
+    // Query agent_sessions/[session_id]/messages subcollection
+    const messagesQuery = query(
+      collection(db, `agent_sessions/${sessionId}/messages`),
+      orderBy('timestamp', 'asc'),
+      limit(limitCount)
+    );
+    
+    const messagesSnapshot = await getDocs(messagesQuery);
+    console.log(`📨 Found ${messagesSnapshot.size} messages for session ${sessionId}`);
+    
+    const messages = messagesSnapshot.docs.map(doc => {
+      const data = doc.data();
+
+      // Handle timestamp conversion
+      let timestamp = data.timestamp || data.created_at;
+      if (timestamp?.toDate) {
+        timestamp = timestamp.toDate();
+      } else if (timestamp?.seconds) {
+        timestamp = new Date(timestamp.seconds * 1000 + (timestamp.nanoseconds || 0) / 1000000);
+      } else if (typeof timestamp === 'string') {
+        timestamp = new Date(timestamp);
+      } else {
+        timestamp = new Date();
+      }
+
+      return {
+        id: doc.id,
+        message_id: doc.id,
+        session_id: sessionId,
+        agent_id: data.agent_id,
+        role: data.role || 'user',
+        content: data.content || '',
+        timestamp: timestamp.toISOString(),
+        processing_time_ms: data.processing_time_ms || 0,
+        total_tokens: data.total_tokens || 0,
+        prompt_tokens: data.prompt_tokens || 0,
+        completion_tokens: data.completion_tokens || 0,
+        cost: data.cost || 0
+      };
+    });
+
+    // Messages are already sorted by Firestore orderBy('timestamp', 'asc')
+    
+    console.log(`✅ Retrieved ${messages.length} messages from agent_sessions/${sessionId}/messages`);
+    return messages;
+    
+  } catch (error) {
+    console.error('Error getting session messages from Firestore:', error);
+    return [];
+  }
+};
+
+/**
+ * Subscribe to real-time session messages from agent_sessions/{sessionId}/messages subcollection
+ * This enables live conversation updates in the frontend
+ */
+export const subscribeToSessionMessages = (sessionId, organizationId, onMessagesUpdate, onError, options = {}) => {
+  try {
+    const { limit: limitCount = 50 } = options;
+
+    console.log(`🔥 Setting up real-time message listener for session: ${sessionId}`);
+
+    // Query agent_sessions/[session_id]/messages subcollection with real-time updates
+    const messagesQuery = query(
+      collection(db, `agent_sessions/${sessionId}/messages`),
+      orderBy('timestamp', 'asc'),
+      limit(limitCount)
+    );
+    
+    return onSnapshot(messagesQuery, (snapshot) => {
+      console.log(`📨 Real-time update: ${snapshot.docs.length} messages for session ${sessionId}`);
+      
+      const messages = snapshot.docs.map(doc => {
+        const data = doc.data();
+
+        // Handle timestamp conversion
+        let timestamp = data.timestamp || data.created_at;
+        if (timestamp?.toDate) {
+          timestamp = timestamp.toDate();
+        } else if (timestamp?.seconds) {
+          timestamp = new Date(timestamp.seconds * 1000 + (timestamp.nanoseconds || 0) / 1000000);
+        } else if (typeof timestamp === 'string') {
+          timestamp = new Date(timestamp);
+        } else {
+          timestamp = new Date();
+        }
+
+        return {
+          id: doc.id,
+          message_id: doc.id,
+          session_id: sessionId,
+          agent_id: data.agent_id,
+          role: data.role || 'user',
+          content: data.content || '',
+          timestamp: timestamp.toISOString(),
+          processing_time_ms: data.processing_time_ms || 0,
+          total_tokens: data.total_tokens || 0,
+          prompt_tokens: data.prompt_tokens || 0,
+          completion_tokens: data.completion_tokens || 0,
+          cost: data.cost || 0
+        };
+      });
+
+      // Messages are already sorted by Firestore orderBy('timestamp', 'asc')
+      
+      console.log(`✅ Real-time update processed: ${messages.length} messages`);
+      onMessagesUpdate(messages);
+    }, (error) => {
+      console.error('❌ Real-time session messages subscription error:', error);
+      if (onError) onError(error);
+    });
+  } catch (error) {
+    console.error('❌ Error setting up session messages subscription:', error);
+    if (onError) onError(error);
+    return () => {}; // Return empty unsubscribe function
+  }
+};
+
+/**
+ * Get test conversation templates
+ */
+export const getTestConversationTemplates = () => {
+  return [
+    {
+      id: 'greeting',
+      name: 'Greeting Test',
+      messages: [
+        'Hello!',
+        'What can you help me with?'
+      ]
+    },
+    {
+      id: 'capabilities',
+      name: 'Capabilities Test',
+      messages: [
+        'What are your capabilities?',
+        'Can you help me with banking questions?',
+        'What tools do you have access to?'
+      ]
+    },
+    {
+      id: 'banking',
+      name: 'Banking Workflow Test',
+      messages: [
+        'I need help with my account',
+        'Can you show me my balance?',
+        'What are my recent transactions?'
+      ]
+    },
+    {
+      id: 'error_handling',
+      name: 'Error Handling Test',
+      messages: [
+        'Show me information for account ID 12345',
+        'Transfer $1000000 from my account',
+        'What is my account balance for invalid account?'
+      ]
+    }
+  ];
+};
+
+// ============================================================================
+// SESSION-SPECIFIC FUNCTIONS FOR AGENT CONVERSATIONS TAB
+// ============================================================================
+
+/**
+ * Get sessions for agent with metadata for conversation browser
+ * Returns sessions with summary information for the sessions list
+ */
+export const getSessionsForAgent = async (agentId, options = {}) => {
+  try {
+    const { limit = 50, offset = 0 } = options;
+    
+    console.log(`🔥 Getting sessions for agent: ${agentId}`);
+    
+    // Import the analytics service function
+    const { getAgentSessionsFromFirestore } = await import('../analytics/analyticsService');
+    
+    // Use the existing analytics service function that aggregates session data
+    const sessionsData = await getAgentSessionsFromFirestore(agentId, 30, limit, offset);
+    
+    console.log(`✅ Retrieved ${sessionsData.sessions.length} sessions for conversation browser`);
+    
+    // Transform the session data to match expected format for conversation browser
+    const formattedSessions = sessionsData.sessions.map(session => ({
+      session_id: session.session_id,
+      start_time: session.start_time,
+      end_time: session.end_time || session.last_message_time,
+      last_message_time: session.last_message_time || session.end_time,
+      last_message_at: session.last_message_at || session.last_message_time,
+      created_at: session.created_at || session.start_time,
+      duration_seconds: session.duration_seconds || 0,
+      message_count: session.actual_message_count || session.message_count || 0,
+      actual_message_count: session.actual_message_count || session.message_count || 0,
+      total_tokens: session.total_tokens || 0,
+      estimated_cost: session.estimated_cost || 0,
+      has_messages: session.has_messages || false,
+      message_preview: session.message_preview || null,
+      status: session.status || 'completed',
+      organization_id: session.organization_id,
+      profile_name: session.profile_name || null,
+      mode: session.mode || 'production', // development, testing, or production
+      channel: session.channel || 'api' // IMPORTANT: Include channel for icon display
+    }));
+    
+    return formattedSessions;
+
+  } catch (error) {
+    console.error(`Error getting sessions for agent ${agentId}:`, error);
+    return [];
+  }
+};
+
+/**
+ * Subscribe to real-time updates for agent sessions
+ * Returns unsubscribe function
+ */
+export const subscribeToAgentSessions = (agentId, callback, options = {}) => {
+  try {
+    const { limitCount = 10 } = options;
+
+    console.log(`🔔 Setting up real-time listener for agent sessions: ${agentId}`);
+
+    // Query agent_sessions collection filtered by agent_id
+    const sessionsRef = collection(db, 'agent_sessions');
+    const sessionsQuery = query(
+      sessionsRef,
+      where('agent_id', '==', agentId),
+      orderBy('last_message_at', 'desc'),
+      limit(limitCount)
+    );
+
+    // Set up real-time listener
+    const unsubscribe = onSnapshot(
+      sessionsQuery,
+      async (snapshot) => {
+        console.log(`🔔 Real-time update: ${snapshot.docs.length} sessions`);
+
+        // Transform snapshot docs to session format
+        const sessions = snapshot.docs.map(doc => {
+          const data = doc.data();
+          return {
+            session_id: doc.id,
+            start_time: data.created_at || data.start_time,
+            end_time: data.end_time,
+            last_message_time: data.last_message_at,
+            last_message_at: data.last_message_at,
+            created_at: data.created_at,
+            duration_seconds: data.duration_seconds || 0,
+            message_count: data.message_count || 0,
+            actual_message_count: data.message_count || 0,
+            total_tokens: data.total_tokens || 0,
+            estimated_cost: data.cost || 0,
+            has_messages: (data.message_count || 0) > 0,
+            message_preview: null,
+            status: data.status || 'completed',
+            organization_id: data.organization_id,
+            profile_name: data.profile_name || null,
+            mode: data.mode || 'production',
+            channel: data.channel || 'api'
+          };
+        });
+
+        // Call the callback with updated sessions
+        callback(sessions);
+      },
+      (error) => {
+        console.error(`❌ Error in real-time sessions listener:`, error);
+        callback([]);
+      }
+    );
+
+    return unsubscribe;
+
+  } catch (error) {
+    console.error(`Error setting up sessions subscription for agent ${agentId}:`, error);
+    return () => {}; // Return empty unsubscribe function
+  }
+};
+
+/**
+ * Get messages for a specific session
+ * Returns individual messages for the conversation view
+ */
+export const getMessagesForSession = async (sessionId, agentId) => {
+  try {
+    console.log(`🔥 Getting messages for session: ${sessionId}`);
+
+    // Query agent_sessions/[session_id]/messages subcollection
+    const messagesRef = collection(db, `agent_sessions/${sessionId}/messages`);
+    const messagesQuery = query(
+      messagesRef,
+      orderBy('timestamp', 'asc')
+    );
+    
+    const messagesSnapshot = await getDocs(messagesQuery);
+    console.log(`📨 Found ${messagesSnapshot.size} messages for session`);
+    
+    if (messagesSnapshot.empty) {
+      return [];
+    }
+    
+    // Process messages
+    const messages = [];
+
+    messagesSnapshot.forEach((doc) => {
+      const messageData = doc.data();
+
+      // Handle timestamp conversion
+      let timestamp = messageData.timestamp || messageData.created_at;
+      if (timestamp?.toDate) {
+        timestamp = timestamp.toDate();
+      } else if (timestamp?.seconds) {
+        timestamp = new Date(timestamp.seconds * 1000 + (timestamp.nanoseconds || 0) / 1000000);
+      } else if (typeof timestamp === 'string') {
+        timestamp = new Date(timestamp);
+      } else {
+        timestamp = new Date();
+      }
+
+      // Use flat structure for token data (matches backend Python structure)
+      const totalTokens = messageData.total_tokens || 0;
+      const promptTokens = messageData.prompt_tokens || 0;
+      const completionTokens = messageData.completion_tokens || 0;
+      const messageCost = messageData.cost || 0;
+
+      messages.push({
+        id: doc.id,
+        session_id: sessionId,
+        agent_id: messageData.agent_id,
+        role: messageData.role || 'user',
+        content: messageData.content || '',
+        timestamp: timestamp.toISOString(),
+        total_tokens: totalTokens,
+        prompt_tokens: promptTokens,
+        completion_tokens: completionTokens,
+        cost: messageCost,
+        // Human handoff fields
+        is_human_response: messageData.is_human_response || false,
+        operator_email: messageData.operator_email || null,
+        operator_id: messageData.operator_id || null,
+        // Delivery status fields (from nested delivery object)
+        delivery_status: messageData.delivery?.status || null,
+        delivered_at: messageData.delivery?.delivered_at?.toDate?.() || null,
+        read_at: messageData.delivery?.read_at?.toDate?.() || null,
+        failed_reason: messageData.delivery?.error_message || null
+      });
+    });
+
+    // Messages are already sorted by Firestore orderBy('timestamp', 'asc')
+    
+    console.log(`✅ Processed ${messages.length} messages for session ${sessionId}`);
+    return messages;
+    
+  } catch (error) {
+    console.error(`Error getting messages for session ${sessionId}:`, error);
+    
+    // Try fallback query without sequence number ordering
+    try {
+      console.log(`🔄 Trying fallback query for session ${sessionId}`);
+
+      const messagesRef = collection(db, `agent_sessions/${sessionId}/messages`);
+      const fallbackQuery = query(messagesRef);
+      
+      const fallbackSnapshot = await getDocs(fallbackQuery);
+      console.log(`📨 Fallback found ${fallbackSnapshot.size} messages`);
+      
+      const fallbackMessages = [];
+      fallbackSnapshot.forEach((doc) => {
+        const messageData = doc.data();
+        const messageInfo = messageData.message_info || {};
+        
+        let timestamp = messageInfo.timestamp || messageData.created_at || new Date();
+        if (timestamp?.toDate) {
+          timestamp = timestamp.toDate();
+        } else if (timestamp?.seconds) {
+          timestamp = new Date(timestamp.seconds * 1000);
+        } else if (typeof timestamp === 'string') {
+          timestamp = new Date(timestamp);
+        }
+        
+        // Use flat structure for token data (matches backend Python structure)
+        const totalTokens = messageData.total_tokens || 0;
+        const promptTokens = messageData.prompt_tokens || 0;
+        const completionTokens = messageData.completion_tokens || 0;
+
+        fallbackMessages.push({
+          id: messageData.message_id || doc.id,
+          session_id: sessionId,
+          role: messageInfo.role || 'user',
+          content: messageInfo.content || '',
+          timestamp: timestamp.toISOString(),
+          sequence_number: messageInfo.sequence_number || 0,
+          total_tokens: totalTokens,
+          prompt_tokens: promptTokens,
+          completion_tokens: completionTokens,
+          cost: messageData.cost || 0,
+          processing_time_ms: messageData.processing_time_ms || 0,
+          response_time: messageData.response_time || 0,
+          organization_id: messageData.organization_id,
+          // Human handoff fields
+          is_human_response: messageData.is_human_response || false,
+          operator_email: messageData.operator_email || null,
+          operator_id: messageData.operator_id || null,
+          // Delivery status fields (from nested delivery object)
+          delivery_status: messageData.delivery?.status || null,
+          delivered_at: messageData.delivery?.delivered_at?.toDate?.() || null,
+          read_at: messageData.delivery?.read_at?.toDate?.() || null,
+          failed_reason: messageData.delivery?.error_message || null
+        });
+      });
+      
+      // Sort by timestamp as fallback
+      fallbackMessages.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+      
+      return fallbackMessages;
+      
+    } catch (fallbackError) {
+      console.error(`Fallback query also failed for session ${sessionId}:`, fallbackError);
+      return [];
+    }
+  }
+};

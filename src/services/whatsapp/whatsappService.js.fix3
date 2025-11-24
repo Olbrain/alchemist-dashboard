@@ -1,0 +1,1061 @@
+/**
+ * WhatsApp Twilio Integration Service
+ *
+ * Service for Twilio-based WhatsApp Business API integration.
+ * Handles account creation, verification, and management via agent-bridge.
+ */
+
+// import { getFirestore, collection, query, where, getDocs } from 'firebase/firestore'; // REMOVED: Firebase/Firestore
+import { getServiceApiUrl } from '../config/apiConfig';
+import { logActivity } from '../activity/activityService';
+import { AGENT_ACTIVITIES, RESOURCE_TYPES } from '../../constants/activityTypes';
+
+// FIRESTORE STUBS - These functions are stubbed because Firestore is disabled
+const collection = (...args) => { console.warn('Firestore disabled: collection() called'); return null; };
+const doc = (...args) => { console.warn('Firestore disabled: doc() called'); return null; };
+const getDoc = async (...args) => { console.warn('Firestore disabled: getDoc() called'); return { exists: () => false, data: () => ({}) }; };
+const getDocs = async (...args) => { console.warn('Firestore disabled: getDocs() called'); return { docs: [], size: 0, forEach: () => {} }; };
+const query = (...args) => { console.warn('Firestore disabled: query() called'); return null; };
+const where = (...args) => { console.warn('Firestore disabled: where() called'); return null; };
+const orderBy = (...args) => { console.warn('Firestore disabled: orderBy() called'); return null; };
+const limit = (...args) => { console.warn('Firestore disabled: limit() called'); return null; };
+const onSnapshot = (...args) => { console.warn('Firestore disabled: onSnapshot() called'); const callback = args.find(a => typeof a === 'function'); if (callback) setTimeout(() => callback({ docs: [], size: 0, forEach: () => {} }), 0); return () => {}; };
+const getFirestore = () => { console.warn('Firestore disabled: getFirestore() called'); return null; };
+
+
+class WhatsAppService {
+  constructor() {
+    this.baseURL = getServiceApiUrl('agent-bridge');
+  }
+
+  /**
+   * Get WhatsApp account by agent ID - Direct Firestore query
+   */
+  async getAccount(agentId) {
+    try {
+      const db = getFirestore();
+
+      // Query whatsapp_twilio_accounts collection by bsp_account_id (which equals agentId)
+      const accountsRef = collection(db, 'whatsapp_twilio_accounts');
+      const q = query(
+        accountsRef,
+        where('bsp_account_id', '==', agentId)
+      );
+
+      const querySnapshot = await getDocs(q);
+
+      if (querySnapshot.empty) {
+        return null; // Account not found
+      }
+
+      // Get the first matching document
+      const doc = querySnapshot.docs[0];
+      const accountData = doc.data();
+
+      return {
+        id: doc.id,
+        ...accountData,
+        agent_id: agentId, // Add agent_id for frontend compatibility
+        // Handle Firestore Timestamp conversion
+        created_at: accountData.created_at,
+        updated_at: accountData.updated_at
+      };
+    } catch (error) {
+      console.error('Error getting WhatsApp account from Firestore:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Create WhatsApp account
+   */
+  async createAccount(agentId, phoneNumber, businessName) {
+    try {
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+
+      const response = await fetch(`${this.baseURL}/api/whatsapp/accounts`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          account_id: agentId,
+          phone_number: phoneNumber,
+          business_profile: {
+            name: businessName || 'Business Solutions',
+            industry: 'technology',
+            description: 'AI-powered assistant'
+          }
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Account creation failed: ${response.status}`);
+      }
+
+      const result = await response.json();
+
+      // Log WhatsApp account creation activity
+      try {
+        await logActivity({
+          activity_type: AGENT_ACTIVITIES.WHATSAPP_CONNECTED,
+          resource_type: RESOURCE_TYPES.INTEGRATION,
+          resource_id: agentId,
+          related_resource_type: RESOURCE_TYPES.AGENT,
+          related_resource_id: agentId,
+          activity_details: {
+            integration_type: 'whatsapp',
+            phone_number: phoneNumber ? phoneNumber.substring(0, 6) + 'XXX' : 'unknown', // Mask phone for privacy
+            business_name: businessName,
+            account_id: agentId,
+            platform: 'twilio'
+          }
+        });
+      } catch (logError) {
+        console.error('Failed to log WhatsApp account creation activity:', logError);
+      }
+
+      return result;
+    } catch (error) {
+      console.error('Error creating WhatsApp account:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Validate phone number format (client-side)
+   */
+  validatePhoneNumber(phoneNumber) {
+    if (!phoneNumber) return false;
+    
+    // Basic international format validation
+    const phoneRegex = /^\+[1-9]\d{1,14}$/;
+    return phoneRegex.test(phoneNumber.trim());
+  }
+
+  /**
+   * Request verification code
+   */
+  async requestVerificationCode(agentId, method = 'sms') {
+    try {
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+      
+      const response = await fetch(`${this.baseURL}/api/whatsapp/accounts/${agentId}/verification`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          verification_method: method.toLowerCase()
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Verification request failed: ${response.status}`);
+      }
+
+      const result = await response.json();
+      return {
+        success: true,
+        message: result.message || 'Verification code sent successfully'
+      };
+    } catch (error) {
+      console.error('Error requesting verification code:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Verify phone number with code
+   */
+  async verifyPhoneNumber(agentId, verificationCode) {
+    try {
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+      
+      const response = await fetch(`${this.baseURL}/api/whatsapp/accounts/${agentId}/verify`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          verification_code: verificationCode
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Verification failed: ${response.status}`);
+      }
+
+      const result = await response.json();
+      return {
+        verified: result.verified || false,
+        message: result.message || (result.verified ? 'Phone number verified successfully' : 'Verification failed')
+      };
+    } catch (error) {
+      console.error('Error verifying phone number:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Validate business name
+   */
+  async validateBusinessName(businessName) {
+    try {
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+
+      const response = await fetch(`${this.baseURL}/api/whatsapp/validate-business-name`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          business_name: businessName
+        })
+      });
+
+      if (!response.ok) {
+        // Non-critical validation - don't throw error
+        return { is_valid: true, violations: [] };
+      }
+
+      const result = await response.json();
+      return {
+        is_valid: result.is_valid || true,
+        violations: result.violations || []
+      };
+    } catch (error) {
+      console.error('Error validating business name:', error);
+      // Non-critical validation - return valid by default
+      return { is_valid: true, violations: [] };
+    }
+  }
+
+  /**
+   * Update WhatsApp sender profile (force update for existing senders)
+   */
+  async updateSenderProfile(agentId, businessName) {
+    try {
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+
+      const response = await fetch(`${this.baseURL}/api/whatsapp/accounts/${agentId}/update-sender`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          business_name: businessName
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Failed to update sender profile: ${response.status}`);
+      }
+
+      const result = await response.json();
+      return result;
+    } catch (error) {
+      console.error('Error updating sender profile:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Use existing WhatsApp sender (don't update profile)
+   */
+  async useExistingSender(agentId) {
+    try {
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+
+      const response = await fetch(`${this.baseURL}/api/whatsapp/accounts/${agentId}/use-existing-sender`, {
+        method: 'POST',
+        headers
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Failed to use existing sender: ${response.status}`);
+      }
+
+      const result = await response.json();
+      return result;
+    } catch (error) {
+      console.error('Error using existing sender:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Delete WhatsApp account
+   */
+  async deleteAccount(agentId) {
+    try {
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+      
+      const response = await fetch(`${this.baseURL}/api/whatsapp/accounts/${agentId}`, {
+        method: 'DELETE',
+        headers
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Account deletion failed: ${response.status}`);
+      }
+
+      await response.json();
+
+      // Log WhatsApp account deletion activity
+      try {
+        await logActivity({
+          activity_type: AGENT_ACTIVITIES.WHATSAPP_DISCONNECTED,
+          resource_type: RESOURCE_TYPES.INTEGRATION,
+          resource_id: agentId,
+          related_resource_type: RESOURCE_TYPES.AGENT,
+          related_resource_id: agentId,
+          activity_details: {
+            integration_type: 'whatsapp',
+            account_id: agentId,
+            platform: 'twilio',
+            action: 'disconnected'
+          }
+        });
+      } catch (logError) {
+        console.error('Failed to log WhatsApp account deletion activity:', logError);
+      }
+      
+      return { success: true };
+    } catch (error) {
+      console.error('Error deleting WhatsApp account:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get account health status
+   */
+  async getAccountHealth(agentId) {
+    try {
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+      
+      const response = await fetch(`${this.baseURL}/api/whatsapp/accounts/${agentId}/health`, {
+        headers
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Health check failed: ${response.status}`);
+      }
+
+      const result = await response.json();
+      return {
+        status: result.status || 'unknown',
+        quality_rating: result.quality_rating || 'unknown',
+        last_activity: result.last_activity || null
+      };
+    } catch (error) {
+      console.error('Error getting account health:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Send test message
+   */
+  async sendTestMessage(agentId, toNumber, message) {
+    try {
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+      
+      const response = await fetch(`${this.baseURL}/api/whatsapp/accounts/${agentId}/test`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          to: toNumber,
+          message: message || 'Hello! This is a test message from your AI agent.'
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Test message failed: ${response.status}`);
+      }
+
+      const result = await response.json();
+      return result;
+    } catch (error) {
+      console.error('Error sending test message:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get comprehensive verification status
+   */
+  async getComprehensiveStatus(agentId) {
+    try {
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+      
+      const response = await fetch(`${this.baseURL}/api/whatsapp/accounts/${agentId}/comprehensive-status`, {
+        headers
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Status check failed: ${response.status}`);
+      }
+
+      const result = await response.json();
+      return result;
+    } catch (error) {
+      console.error('Error getting comprehensive status:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get Twilio sender status
+   */
+  async getTwilioStatus(agentId) {
+    try {
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+      
+      const response = await fetch(`${this.baseURL}/api/whatsapp/accounts/${agentId}/twilio-status`, {
+        headers
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Twilio status check failed: ${response.status}`);
+      }
+
+      const result = await response.json();
+      return result;
+    } catch (error) {
+      console.error('Error getting Twilio status:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Submit Meta verification code
+   */
+  async submitMetaVerificationCode(agentId, verificationCode) {
+    try {
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+      
+      const response = await fetch(`${this.baseURL}/api/whatsapp/accounts/${agentId}/submit-verification-code`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          verification_code: verificationCode
+        })
+      });
+
+      if (!response.ok) {
+        let errorData = {};
+        let errorText = '';
+        
+        try {
+          errorData = await response.json();
+        } catch (parseError) {
+          try {
+            errorText = await response.text();
+          } catch (textError) {
+            errorText = `HTTP ${response.status} ${response.statusText}`;
+          }
+        }
+
+        let errorMessage = 'Meta verification failed';
+        
+        if (errorData.detail) {
+          errorMessage += `: ${errorData.detail}`;
+        } else if (errorText) {
+          errorMessage += `: ${errorText}`;
+        } else {
+          errorMessage += `: HTTP ${response.status} ${response.statusText}`;
+        }
+        
+        console.error('Meta verification code submission failed:', {
+          status: response.status,
+          statusText: response.statusText,
+          errorData,
+          errorText,
+          agentId,
+          verificationCode: verificationCode ? '***' : 'empty'
+        });
+        
+        throw new Error(errorMessage);
+      }
+
+      const result = await response.json();
+      return result;
+    } catch (error) {
+      console.error('Error submitting Meta verification code:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Complete verification process
+   */
+  async completeVerification(agentId) {
+    try {
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+      
+      const response = await fetch(`${this.baseURL}/api/whatsapp/accounts/${agentId}/complete-verification`, {
+        method: 'POST',
+        headers
+      });
+
+      if (!response.ok) {
+        let errorData = {};
+        let errorText = '';
+        
+        try {
+          // Try to parse JSON error response
+          errorData = await response.json();
+        } catch (parseError) {
+          // If JSON parsing fails, try to get text response
+          try {
+            errorText = await response.text();
+          } catch (textError) {
+            errorText = `HTTP ${response.status} ${response.statusText}`;
+          }
+        }
+
+        // Create comprehensive error message
+        let errorMessage = 'Verification completion failed';
+        
+        if (errorData.detail) {
+          errorMessage += `: ${errorData.detail}`;
+        } else if (errorText) {
+          errorMessage += `: ${errorText}`;
+        } else {
+          errorMessage += `: HTTP ${response.status} ${response.statusText}`;
+        }
+        
+        // Log detailed error information for debugging
+        console.error('WhatsApp verification completion failed:', {
+          status: response.status,
+          statusText: response.statusText,
+          errorData,
+          errorText,
+          agentId,
+          url: `${this.baseURL}/api/whatsapp/accounts/${agentId}/complete-verification`
+        });
+        
+        throw new Error(errorMessage);
+      }
+
+      const result = await response.json();
+      return result;
+    } catch (error) {
+      console.error('Error completing verification:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Retry verification code
+   */
+  async retryVerificationCode(agentId, method = 'sms') {
+    try {
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+      
+      const response = await fetch(`${this.baseURL}/api/whatsapp/accounts/${agentId}/retry-verification`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          method: method.toLowerCase()
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Verification retry failed: ${response.status}`);
+      }
+
+      const result = await response.json();
+      return result;
+    } catch (error) {
+      console.error('Error retrying verification code:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Register webhook for AI agent message handling via Meta Graph API
+   */
+  async registerWebhook(agentId, webhookUrl) {
+    try {
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+      
+      const response = await fetch(`${this.baseURL}/api/whatsapp/accounts/${agentId}/webhook`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          webhook_url: webhookUrl,
+          events: ['messages', 'message_deliveries', 'message_reads']
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Webhook registration failed: ${response.status}`);
+      }
+
+      const result = await response.json();
+      return {
+        success: true,
+        webhook_url: result.webhook_url,
+        account_id: result.account_id,
+        message: result.message || 'Webhook registered successfully via Twilio'
+      };
+    } catch (error) {
+      console.error('Error registering webhook:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get webhook status
+   */
+  async getWebhookStatus(agentId) {
+    try {
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+
+      const response = await fetch(`${this.baseURL}/api/whatsapp/accounts/${agentId}/webhook`, {
+        headers
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Webhook status check failed: ${response.status}`);
+      }
+
+      const result = await response.json();
+      return result;
+    } catch (error) {
+      console.error('Error getting webhook status:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Send text message
+   */
+  async sendMessage(agentId, to, body) {
+    try {
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+
+      const response = await fetch(`${this.baseURL}/api/whatsapp/messages`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          agent_id: agentId,
+          to: to,
+          body: body
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Message send failed: ${response.status}`);
+      }
+
+      const result = await response.json();
+      return result;
+    } catch (error) {
+      console.error('Error sending message:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Send media message (image, video, document, audio)
+   */
+  async sendMediaMessage(agentId, to, caption, mediaUrl) {
+    try {
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+
+      const response = await fetch(`${this.baseURL}/api/whatsapp/messages/media`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          agent_id: agentId,
+          to: to,
+          caption: caption,
+          media_url: mediaUrl
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Media message send failed: ${response.status}`);
+      }
+
+      const result = await response.json();
+      return result;
+    } catch (error) {
+      console.error('Error sending media message:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Send template message with variables
+   */
+  async sendTemplateMessage(agentId, to, templateSid, variables = {}) {
+    try {
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+
+      const response = await fetch(`${this.baseURL}/api/whatsapp/messages/template`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          agent_id: agentId,
+          to: to,
+          template_sid: templateSid,
+          variables: variables
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Template message send failed: ${response.status}`);
+      }
+
+      const result = await response.json();
+      return result;
+    } catch (error) {
+      console.error('Error sending template message:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Send location message
+   */
+  async sendLocation(agentId, to, latitude, longitude, address = '', label = '') {
+    try {
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+
+      const response = await fetch(`${this.baseURL}/api/whatsapp/messages/location`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          agent_id: agentId,
+          to: to,
+          latitude: latitude,
+          longitude: longitude,
+          address: address,
+          label: label
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Location message send failed: ${response.status}`);
+      }
+
+      const result = await response.json();
+      return result;
+    } catch (error) {
+      console.error('Error sending location:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Upload media file
+   */
+  async uploadMedia(file) {
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const headers = {};
+
+      const response = await fetch(`${this.baseURL}/api/whatsapp/media/upload`, {
+        method: 'POST',
+        headers,
+        body: formData
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Media upload failed: ${response.status}`);
+      }
+
+      const result = await response.json();
+      return result;
+    } catch (error) {
+      console.error('Error uploading media:', error);
+      throw error;
+    }
+  }
+
+  // ========================================================================
+  // TEMPLATE MANAGEMENT METHODS
+  // ========================================================================
+
+  /**
+   * Get all templates for an agent
+   */
+  async getTemplates(agentId) {
+    try {
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+
+      const response = await fetch(`${this.baseURL}/api/whatsapp/templates/${agentId}`, {
+        headers
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Failed to get templates: ${response.status}`);
+      }
+
+      const result = await response.json();
+      return result;
+    } catch (error) {
+      console.error('Error getting templates:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Create a new WhatsApp template
+   */
+  async createTemplate(templateData) {
+    try {
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+
+      const response = await fetch(`${this.baseURL}/api/whatsapp/templates`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(templateData)
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || errorData.message || `Failed to create template: ${response.status}`);
+      }
+
+      const result = await response.json();
+      return result;
+    } catch (error) {
+      console.error('Error creating template:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Update an existing WhatsApp template
+   */
+  async updateTemplate(agentId, templateId, templateData) {
+    try {
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+
+      const response = await fetch(`${this.baseURL}/api/whatsapp/templates/${templateId}?agent_id=${agentId}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify(templateData)
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || errorData.message || `Failed to update template: ${response.status}`);
+      }
+
+      const result = await response.json();
+      return result;
+    } catch (error) {
+      console.error('Error updating template:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Delete a WhatsApp template
+   */
+  async deleteTemplate(agentId, templateId) {
+    try {
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+
+      const response = await fetch(`${this.baseURL}/api/whatsapp/templates/${templateId}?agent_id=${agentId}`, {
+        method: 'DELETE',
+        headers
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Failed to delete template: ${response.status}`);
+      }
+
+      const result = await response.json();
+      return result;
+    } catch (error) {
+      console.error('Error deleting template:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Submit a template for WhatsApp approval
+   */
+  async submitTemplateForApproval(templateId, agentId) {
+    try {
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+
+      const response = await fetch(`${this.baseURL}/api/whatsapp/templates/${templateId}/submit`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          agent_id: agentId
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Failed to submit template: ${response.status}`);
+      }
+
+      const result = await response.json();
+      return result;
+    } catch (error) {
+      console.error('Error submitting template:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get template approval status
+   */
+  async getTemplateStatus(templateId) {
+    try {
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+
+      const response = await fetch(`${this.baseURL}/api/whatsapp/templates/${templateId}/status`, {
+        headers
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Failed to get template status: ${response.status}`);
+      }
+
+      const result = await response.json();
+      return result;
+    } catch (error) {
+      console.error('Error getting template status:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Refresh template status from Twilio
+   */
+  async refreshTemplateStatus(agentId, templateId) {
+    try {
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+
+      const response = await fetch(`${this.baseURL}/api/whatsapp/templates/${templateId}/refresh-status?agent_id=${agentId}`, {
+        method: 'POST',
+        headers
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Failed to refresh template status: ${response.status}`);
+      }
+
+      const result = await response.json();
+      return result;
+    } catch (error) {
+      console.error('Error refreshing template status:', error);
+      throw error;
+    }
+  }
+}
+
+// Create singleton instance
+const whatsAppService = new WhatsAppService();
+
+export default whatsAppService;
+
+// Named exports for convenience
+export const getAccount = whatsAppService.getAccount.bind(whatsAppService);
+export const createAccount = whatsAppService.createAccount.bind(whatsAppService);
+export const validatePhoneNumber = whatsAppService.validatePhoneNumber.bind(whatsAppService);
+export const requestVerificationCode = whatsAppService.requestVerificationCode.bind(whatsAppService);
+export const verifyPhoneNumber = whatsAppService.verifyPhoneNumber.bind(whatsAppService);
+export const validateBusinessName = whatsAppService.validateBusinessName.bind(whatsAppService);
+export const deleteAccount = whatsAppService.deleteAccount.bind(whatsAppService);
+export const getAccountHealth = whatsAppService.getAccountHealth.bind(whatsAppService);
+export const sendTestMessage = whatsAppService.sendTestMessage.bind(whatsAppService);
+export const getComprehensiveStatus = whatsAppService.getComprehensiveStatus.bind(whatsAppService);
+export const getTwilioStatus = whatsAppService.getTwilioStatus.bind(whatsAppService);
+export const submitMetaVerificationCode = whatsAppService.submitMetaVerificationCode.bind(whatsAppService);
+export const completeVerification = whatsAppService.completeVerification.bind(whatsAppService);
+export const retryVerificationCode = whatsAppService.retryVerificationCode.bind(whatsAppService);
+export const registerWebhook = whatsAppService.registerWebhook.bind(whatsAppService);
+export const getWebhookStatus = whatsAppService.getWebhookStatus.bind(whatsAppService);
+export const sendMessage = whatsAppService.sendMessage.bind(whatsAppService);
+export const sendMediaMessage = whatsAppService.sendMediaMessage.bind(whatsAppService);
+export const sendTemplateMessage = whatsAppService.sendTemplateMessage.bind(whatsAppService);
+export const sendLocation = whatsAppService.sendLocation.bind(whatsAppService);
+export const uploadMedia = whatsAppService.uploadMedia.bind(whatsAppService);
+export const getTemplates = whatsAppService.getTemplates.bind(whatsAppService);
+export const createTemplate = whatsAppService.createTemplate.bind(whatsAppService);
+export const updateTemplate = whatsAppService.updateTemplate.bind(whatsAppService);
+export const deleteTemplate = whatsAppService.deleteTemplate.bind(whatsAppService);
+export const submitTemplateForApproval = whatsAppService.submitTemplateForApproval.bind(whatsAppService);
+export const getTemplateStatus = whatsAppService.getTemplateStatus.bind(whatsAppService);
+export const refreshTemplateStatus = whatsAppService.refreshTemplateStatus.bind(whatsAppService);

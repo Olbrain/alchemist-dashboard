@@ -1,0 +1,273 @@
+/**
+ * Tracker Progress Display Component
+ *
+ * Displays real-time progress bars for tracked operations (deployments, file indexing)
+ * from orchestrator responses
+ */
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  Box,
+  LinearProgress,
+  Typography,
+  Chip,
+  Paper,
+  Stack
+} from '@mui/material';
+import {
+  CloudQueue as QueuedIcon,
+  Sync as ProcessingIcon,
+  CheckCircle as CompletedIcon,
+  Error as ErrorIcon,
+  Upload as UploadIcon,
+  CloudUpload as DeploymentIcon
+} from '@mui/icons-material';
+import { db } from '../../utils/firebase';
+// import { doc, onSnapshot } from 'firebase/firestore'; // REMOVED: Firebase/Firestore
+
+// FIRESTORE STUBS - These functions are stubbed because Firestore is disabled
+const doc = (...args) => { console.warn('Firestore disabled: doc() called'); return null; };
+const onSnapshot = (...args) => { console.warn('Firestore disabled: onSnapshot() called'); const callback = args.find(a => typeof a === 'function'); if (callback) setTimeout(() => callback({ docs: [], size: 0, forEach: () => {} }), 0); return () => {}; };
+
+
+const TrackerProgressDisplay = ({ tracker }) => {
+  const [trackedItems, setTrackedItems] = useState({});
+  const unsubscribesRef = useRef(new Map());
+
+  useEffect(() => {
+    if (!tracker || !tracker.items) return;
+
+    // Initialize tracked items
+    const initialItems = {};
+    tracker.items.forEach(item => {
+      initialItems[item.id] = {
+        ...item,
+        currentProgress: item.progress || 0,
+        currentStatus: item.status || 'queued'
+      };
+    });
+    setTrackedItems(initialItems);
+
+    // Set up Firestore listeners for each item
+    tracker.items.forEach(item => {
+      if (!item.collection || !item.id) return;
+
+      // Skip if already subscribed
+      if (unsubscribesRef.current.has(item.id)) return;
+
+      console.log(`📊 Setting up tracker for ${item.name} (${item.id}) in ${item.collection}`);
+
+      const docRef = doc(db, item.collection, item.id);
+      const unsubscribe = onSnapshot(docRef, (snapshot) => {
+        if (snapshot.exists()) {
+          const data = snapshot.data();
+
+          // Extract progress based on collection type
+          let progress = 0;
+          let status = 'queued';
+
+          if (item.collection === 'agent_deployments') {
+            progress = data.progress_percentage || 0;
+            status = data.status || 'queued';
+          } else if (item.collection === 'knowledge_library') {
+            // OpenAI Vector Store status mapping
+            status = data.openai_status || 'unknown';
+            progress = 0; // OpenAI doesn't provide progress percentage
+
+            // Map OpenAI statuses to standard statuses
+            if (status === 'in_progress') {
+              status = 'processing';
+              progress = 50; // Show indeterminate progress
+            } else if (status === 'completed') {
+              status = 'completed';
+              progress = 100;
+            } else if (status === 'failed') {
+              status = 'failed';
+              progress = 0;
+            }
+          }
+
+          console.log(`📊 Progress update for ${item.name}: ${progress}% (${status})`);
+
+          // Update tracked item
+          setTrackedItems(prev => ({
+            ...prev,
+            [item.id]: {
+              ...prev[item.id],
+              currentProgress: progress,
+              currentStatus: status
+            }
+          }));
+
+          // Clean up listener if completed or failed
+          if (status === 'completed' || status === 'failed') {
+            setTimeout(() => {
+              // Keep showing for 5 seconds after completion
+              const unsubscribe = unsubscribesRef.current.get(item.id);
+              if (unsubscribe) {
+                unsubscribe();
+                unsubscribesRef.current.delete(item.id);
+              }
+            }, 5000);
+          }
+        }
+      }, (error) => {
+        console.error(`Error tracking ${item.name}:`, error);
+      });
+
+      unsubscribesRef.current.set(item.id, unsubscribe);
+    });
+
+    // Cleanup function
+    return () => {
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+      const unsubscribes = unsubscribesRef.current;
+      unsubscribes.forEach((unsubscribe) => {
+        unsubscribe();
+      });
+      unsubscribes.clear();
+    };
+  }, [tracker]);
+
+  const getStatusIcon = (status) => {
+    switch (status) {
+      case 'queued':
+        return <QueuedIcon fontSize="small" />;
+      case 'processing':
+        return <ProcessingIcon fontSize="small" />;
+      case 'completed':
+        return <CompletedIcon fontSize="small" />;
+      case 'failed':
+        return <ErrorIcon fontSize="small" />;
+      default:
+        return <QueuedIcon fontSize="small" />;
+    }
+  };
+
+  const getStatusColor = (status) => {
+    switch (status) {
+      case 'queued':
+        return 'default';
+      case 'processing':
+        return 'primary';
+      case 'completed':
+        return 'success';
+      case 'failed':
+        return 'error';
+      default:
+        return 'default';
+    }
+  };
+
+  const getProgressColor = (status) => {
+    switch (status) {
+      case 'queued':
+        return 'inherit';
+      case 'processing':
+        return 'primary';
+      case 'completed':
+        return 'success';
+      case 'failed':
+        return 'error';
+      default:
+        return 'inherit';
+    }
+  };
+
+  const getTypeIcon = (type) => {
+    if (type === 'deployment') {
+      return <DeploymentIcon fontSize="small" sx={{ mr: 1 }} />;
+    } else if (type === 'knowledge_indexing') {
+      return <UploadIcon fontSize="small" sx={{ mr: 1 }} />;
+    }
+    return null;
+  };
+
+  if (!tracker || !tracker.items || tracker.items.length === 0) {
+    return null;
+  }
+
+  return (
+    <Paper
+      elevation={0}
+      sx={{
+        mt: 2,
+        p: 2,
+        bgcolor: (theme) => theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.02)',
+        border: '1px solid',
+        borderColor: (theme) => theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)',
+        borderRadius: 1
+      }}
+    >
+      <Stack spacing={2}>
+        {Object.values(trackedItems).map((item) => (
+          <Box key={item.id}>
+            <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
+              {getTypeIcon(tracker.type)}
+              <Typography variant="body2" sx={{ flex: 1 }}>
+                {item.name}
+              </Typography>
+              <Chip
+                icon={getStatusIcon(item.currentStatus)}
+                label={item.currentStatus}
+                size="small"
+                color={getStatusColor(item.currentStatus)}
+                variant="outlined"
+              />
+            </Box>
+
+            <Box sx={{ display: 'flex', alignItems: 'center' }}>
+              <Box sx={{ width: '100%', mr: 2 }}>
+                <LinearProgress
+                  variant="determinate"
+                  value={item.currentProgress}
+                  color={getProgressColor(item.currentStatus)}
+                  sx={{
+                    height: 8,
+                    borderRadius: 4,
+                    backgroundColor: (theme) =>
+                      theme.palette.mode === 'dark'
+                        ? 'rgba(255,255,255,0.1)'
+                        : 'rgba(0,0,0,0.1)',
+                    '& .MuiLinearProgress-bar': {
+                      borderRadius: 4,
+                      ...(item.currentStatus === 'processing' && {
+                        animation: 'pulse 2s ease-in-out infinite'
+                      })
+                    },
+                    '@keyframes pulse': {
+                      '0%': { opacity: 1 },
+                      '50%': { opacity: 0.7 },
+                      '100%': { opacity: 1 }
+                    }
+                  }}
+                />
+              </Box>
+              <Typography variant="body2" color="text.secondary" sx={{ minWidth: 45 }}>
+                {item.currentProgress}%
+              </Typography>
+            </Box>
+
+            {/* Show additional info for certain statuses */}
+            {item.currentStatus === 'processing' && (
+              <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: 'block' }}>
+                {tracker.type === 'deployment' ? 'Deploying to Cloud Run...' : 'Processing file in OpenAI Vector Store...'}
+              </Typography>
+            )}
+            {item.currentStatus === 'completed' && (
+              <Typography variant="caption" color="success.main" sx={{ mt: 0.5, display: 'block' }}>
+                ✓ {tracker.type === 'deployment' ? 'Deployment complete' : 'File ready for search'}
+              </Typography>
+            )}
+            {item.currentStatus === 'failed' && (
+              <Typography variant="caption" color="error.main" sx={{ mt: 0.5, display: 'block' }}>
+                ✗ {tracker.type === 'deployment' ? 'Deployment failed' : 'Indexing failed'}
+              </Typography>
+            )}
+          </Box>
+        ))}
+      </Stack>
+    </Paper>
+  );
+};
+
+export default TrackerProgressDisplay;

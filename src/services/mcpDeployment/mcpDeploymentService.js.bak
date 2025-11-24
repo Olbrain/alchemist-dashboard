@@ -1,0 +1,367 @@
+/**
+ * MCP Deployment Service
+ *
+ * Service layer for MCP deployment operations.
+ * Handles Firestore queries for MCP service status and enabled tools.
+ */
+import {
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  query,
+  where,
+  orderBy,
+  onSnapshot
+} from 'firebase/firestore';
+import { db } from '../../utils/firebase';
+import { Collections } from '../../constants/collections';
+
+/**
+ * Get MCP service info from agent document
+ *
+ * @param {string} agentId - Agent ID
+ * @returns {Promise<Object>} Service info with URL, status, and timestamp
+ */
+export const getMcpServiceInfo = async (agentId) => {
+  try {
+    const agentRef = doc(db, Collections.AGENTS, agentId);
+    const agentDoc = await getDoc(agentRef);
+
+    if (!agentDoc.exists()) {
+      throw new Error('Agent not found');
+    }
+
+    const data = agentDoc.data();
+
+    return {
+      serviceUrl: data.mcp_service_url || null,
+      updatedAt: data.mcp_service_updated_at || null,
+      status: data.mcp_service_status || null,
+      isDeployed: Boolean(data.mcp_service_url)
+    };
+  } catch (error) {
+    console.error('Error getting MCP service info:', error);
+    throw error;
+  }
+};
+
+/**
+ * Get all enabled MCP tools for agent
+ *
+ * @param {string} agentId - Agent ID
+ * @returns {Promise<Array>} Array of enabled MCP tool configurations
+ */
+export const getEnabledMcpTools = async (agentId) => {
+  try {
+    const toolsRef = collection(db, `${Collections.AGENTS}/${agentId}/tool_configs`);
+    const toolsQuery = query(toolsRef, where('enabled', '==', true));
+    const toolsSnapshot = await getDocs(toolsQuery);
+
+    const enabledTools = [];
+    toolsSnapshot.forEach((toolDoc) => {
+      const data = toolDoc.data();
+      // Only include MCP tools (prefixed with mcp_)
+      if (toolDoc.id.startsWith('mcp_')) {
+        enabledTools.push({
+          id: toolDoc.id,
+          serverId: data.server_id || data.tool_id || toolDoc.id.replace('mcp_', ''),
+          configuration: data.config || {},
+          enabled: data.enabled,
+          configured: data.configured || false,
+          createdAt: data.created_at,
+          updatedAt: data.updated_at
+        });
+      }
+    });
+
+    return enabledTools;
+  } catch (error) {
+    console.error('Error getting enabled MCP tools:', error);
+    throw error;
+  }
+};
+
+/**
+ * Get MCP server details from public_mcp_servers collection
+ *
+ * @param {string} serverId - Server ID
+ * @returns {Promise<Object|null>} Server details or null if not found
+ */
+export const getMcpServerDetails = async (serverId) => {
+  try {
+    const serverRef = doc(db, Collections.PUBLIC_MCP_SERVERS, serverId);
+    const serverDoc = await getDoc(serverRef);
+
+    if (!serverDoc.exists()) {
+      console.warn(`MCP server not found: ${serverId}`);
+      return null;
+    }
+
+    const data = serverDoc.data();
+
+    return {
+      id: serverDoc.id,
+      name: data.name || serverId,
+      description: data.description || '',
+      category: data.category || 'general',
+      tags: data.tags || [],
+      installation: data.installation || {},
+      credentialMapping: data.credential_mapping || {},
+      syncedFrom: data.synced_from,
+      syncedAt: data.synced_at
+    };
+  } catch (error) {
+    console.error(`Error getting MCP server details for ${serverId}:`, error);
+    return null;
+  }
+};
+
+/**
+ * Get enabled MCP tools with server details
+ * Combines tool configurations with server metadata
+ *
+ * @param {string} agentId - Agent ID
+ * @returns {Promise<Array>} Array of enabled tools with server details
+ */
+export const getEnabledMcpToolsWithDetails = async (agentId) => {
+  try {
+    // Get enabled tools
+    const enabledTools = await getEnabledMcpTools(agentId);
+
+    // Fetch server details for each tool in parallel
+    const toolsWithDetails = await Promise.all(
+      enabledTools.map(async (tool) => {
+        const serverDetails = await getMcpServerDetails(tool.serverId);
+        return {
+          ...tool,
+          serverName: serverDetails?.name || tool.serverId,
+          serverDescription: serverDetails?.description || '',
+          serverCategory: serverDetails?.category || 'general',
+          serverTags: serverDetails?.tags || [],
+          credentialMapping: serverDetails?.credentialMapping || {}
+        };
+      })
+    );
+
+    return toolsWithDetails;
+  } catch (error) {
+    console.error('Error getting enabled MCP tools with details:', error);
+    throw error;
+  }
+};
+
+/**
+ * Get enabled MCP tools with full details including tools array
+ * Fetches complete server information including available tools
+ *
+ * @param {string} agentId - Agent ID
+ * @returns {Promise<Array>} Array of enabled tools with full server details including tools
+ */
+export const getEnabledMcpToolsWithFullDetails = async (agentId) => {
+  try {
+    // Get enabled tools
+    const enabledTools = await getEnabledMcpTools(agentId);
+
+    // Fetch server details for each tool in parallel
+    const toolsWithFullDetails = await Promise.all(
+      enabledTools.map(async (tool) => {
+        const serverDetails = await getMcpServerDetails(tool.serverId);
+        return {
+          ...tool,
+          serverName: serverDetails?.name || tool.serverId,
+          serverDescription: serverDetails?.description || '',
+          serverCategory: serverDetails?.category || 'general',
+          serverTags: serverDetails?.tags || [],
+          credentialMapping: serverDetails?.credentialMapping || {},
+          estimatedToolsCount: serverDetails?.estimated_tools_count || 0,
+          tools: serverDetails?.tools || [],
+          serverVersion: serverDetails?.version || 'unknown'
+        };
+      })
+    );
+
+    return toolsWithFullDetails;
+  } catch (error) {
+    console.error('Error getting enabled MCP tools with full details:', error);
+    throw error;
+  }
+};
+
+/**
+ * Check if tool configuration is complete
+ *
+ * @param {Object} tool - Tool object with configuration and credential mapping
+ * @returns {Object} Status object with isComplete flag and missing credentials
+ */
+export const checkToolConfigurationStatus = (tool) => {
+  if (!tool.credentialMapping || Object.keys(tool.credentialMapping).length === 0) {
+    // No credentials required
+    return {
+      isComplete: true,
+      configuredCount: 0,
+      requiredCount: 0,
+      missingCredentials: []
+    };
+  }
+
+  const configuration = tool.configuration || {};
+  const requiredCredentials = Object.keys(tool.credentialMapping);
+  const configuredCredentials = Object.keys(configuration).filter(key =>
+    configuration[key] !== undefined &&
+    configuration[key] !== null &&
+    configuration[key] !== ''
+  );
+
+  const missingCredentials = requiredCredentials.filter(
+    key => !configuredCredentials.includes(key)
+  );
+
+  return {
+    isComplete: missingCredentials.length === 0,
+    configuredCount: configuredCredentials.length,
+    requiredCount: requiredCredentials.length,
+    missingCredentials
+  };
+};
+
+/**
+ * Deploy MCP service via backend API
+ *
+ * Creates a deployment record and triggers the MCP deployment job.
+ * The backend handles Firestore document creation and Cloud Run job execution.
+ *
+ * @param {string} agentId - Agent ID
+ * @returns {Promise<Object>} Deployment status with deployment_id
+ */
+export const deployMcpService = async (agentId) => {
+  try {
+    // Call backend API to deploy MCP service
+    const { agentBuilderApi } = await import('../config/apiConfig');
+    const response = await agentBuilderApi.post(`/api/agents/${agentId}/mcp/deploy`);
+    const responseData = response.data;
+
+    console.log('✅ Backend API MCP deployment response:', responseData);
+
+    // Return response in format expected by frontend
+    return {
+      deployment_id: responseData.deployment_id,
+      status: responseData.status || 'queued',
+      message: responseData.message || 'MCP deployment initiated successfully',
+      agent_id: responseData.agent_id
+    };
+  } catch (error) {
+    console.error('Error deploying MCP service via backend API:', error);
+
+    // Extract error message from axios error response
+    const errorMessage = error.response?.data?.detail || error.response?.data?.message || error.message;
+    throw new Error(errorMessage);
+  }
+};
+
+/**
+ * Subscribe to MCP service status changes
+ *
+ * @param {string} agentId - Agent ID
+ * @param {Function} onUpdate - Callback for updates
+ * @param {Function} onError - Callback for errors
+ * @returns {Function} Unsubscribe function
+ */
+export const subscribeToMcpServiceStatus = (agentId, onUpdate, onError) => {
+  const agentRef = doc(db, Collections.AGENTS, agentId);
+
+  const unsubscribe = onSnapshot(
+    agentRef,
+    (docSnapshot) => {
+      if (docSnapshot.exists()) {
+        const data = docSnapshot.data();
+        onUpdate({
+          serviceUrl: data.mcp_service_url || null,
+          updatedAt: data.mcp_service_updated_at || null,
+          status: data.mcp_service_status || null,
+          isDeployed: Boolean(data.mcp_service_url)
+        });
+      }
+    },
+    (error) => {
+      console.error('Error subscribing to MCP service status:', error);
+      if (onError) {
+        onError(error);
+      }
+    }
+  );
+
+  return unsubscribe;
+};
+
+/**
+ * Subscribe to MCP deployment history
+ * Real-time listener for deployment records filtered by agent_id
+ *
+ * @param {string} agentId - Agent ID
+ * @param {Function} onUpdate - Callback for updates with array of deployments
+ * @param {Function} onError - Callback for errors
+ * @returns {Function} Unsubscribe function
+ */
+export const subscribeToMcpDeployments = (agentId, onUpdate, onError) => {
+  try {
+    const deploymentsRef = collection(db, 'mcp_deployments');
+    const deploymentsQuery = query(
+      deploymentsRef,
+      where('agent_id', '==', agentId),
+      orderBy('created_at', 'desc')
+    );
+
+    const unsubscribe = onSnapshot(
+      deploymentsQuery,
+      (querySnapshot) => {
+        const deployments = [];
+        querySnapshot.forEach((doc) => {
+          deployments.push({
+            id: doc.id,
+            ...doc.data()
+          });
+        });
+        onUpdate(deployments);
+      },
+      (error) => {
+        console.error('Error subscribing to MCP deployments:', error);
+        if (onError) {
+          onError(error);
+        }
+      }
+    );
+
+    return unsubscribe;
+  } catch (error) {
+    console.error('Error setting up MCP deployments subscription:', error);
+    if (onError) {
+      onError(error);
+    }
+    return () => {}; // Return empty unsubscribe function
+  }
+};
+
+/**
+ * Format timestamp for display
+ *
+ * @param {any} timestamp - Firestore timestamp or Date
+ * @returns {string} Formatted time ago string
+ */
+export const formatTimeAgo = (timestamp) => {
+  if (!timestamp) return 'Never';
+
+  const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
+  const now = new Date();
+  const diffMs = now - date;
+  const diffMinutes = Math.floor(diffMs / (1000 * 60));
+  const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
+  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+  if (diffMinutes < 1) return 'Just now';
+  if (diffMinutes < 60) return `${diffMinutes} minute${diffMinutes !== 1 ? 's' : ''} ago`;
+  if (diffHours < 24) return `${diffHours} hour${diffHours !== 1 ? 's' : ''} ago`;
+  if (diffDays < 7) return `${diffDays} day${diffDays !== 1 ? 's' : ''} ago`;
+
+  return date.toLocaleDateString();
+};

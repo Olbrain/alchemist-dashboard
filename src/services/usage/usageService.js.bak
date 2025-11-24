@@ -1,0 +1,1325 @@
+/**
+ * Usage Service
+ *
+ * Service layer for fetching and processing usage analytics data
+ * from Firestore collections managed by usage_aggregator.py
+ */
+
+import {
+  doc,
+  getDoc,
+  collection,
+  query,
+  where,
+  orderBy,
+  limit as firestoreLimit,
+  getDocs,
+  onSnapshot,
+  Timestamp
+} from 'firebase/firestore';
+import { db } from '../../utils/firebase';
+
+class UsageService {
+  constructor() {
+    this.collections = {
+      AGENT_USAGE: 'agent_usage',
+      ORGANIZATIONS: 'organizations',
+      PROJECTS: 'projects',
+      AGENTS: 'agents',
+      AGENT_SESSIONS: 'agent_sessions'
+    };
+  }
+
+  // ========== ORGANIZATION USAGE ==========
+
+  /**
+   * Get organization-level usage analytics by aggregating all agent usage
+   */
+  async getOrganizationUsage(organizationId) {
+    try {
+      const usageQuery = query(
+        collection(db, this.collections.ORGANIZATIONS, organizationId, 'usage')
+      );
+
+      const snapshot = await getDocs(usageQuery);
+
+      // Initialize aggregated data
+      const aggregated = {
+        total_tokens: 0,
+        total_messages: 0,
+        total_sessions: 0,
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        cost: 0,
+        active_agents: snapshot.size,
+        agents: []
+      };
+
+      snapshot.forEach((usageDoc) => {
+        const data = usageDoc.data();
+
+        // Aggregate totals (note field name differences)
+        aggregated.total_tokens += data.total_tokens || 0;
+        aggregated.total_messages += data.message_count || 0; // Different field name
+        aggregated.total_sessions += data.session_count || 0; // Different field name
+        aggregated.prompt_tokens += data.prompt_tokens || 0;
+        aggregated.completion_tokens += data.completion_tokens || 0;
+        aggregated.cost += data.cost || 0;
+
+        // Store agent data for further analysis
+        aggregated.agents.push({
+          agent_id: usageDoc.id,
+          total_tokens: data.total_tokens || 0,
+          total_messages: data.message_count || 0,
+          total_sessions: data.session_count || 0,
+          updated_at: data.updated_at
+        });
+      });
+
+      return aggregated;
+    } catch (error) {
+      console.error('Error fetching organization usage:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get project breakdown for organization
+   */
+  async getOrganizationProjectsUsage(organizationId) {
+    try {
+      // First, get all projects in the organization
+      const projectsQuery = query(
+        collection(db, this.collections.PROJECTS),
+        where('organization_id', '==', organizationId)
+      );
+
+      const projectsSnapshot = await getDocs(projectsQuery);
+      const projectsUsage = [];
+
+      // For each project, get its aggregated usage
+      for (const projectDoc of projectsSnapshot.docs) {
+        const projectData = projectDoc.data();
+        const projectId = projectDoc.id;
+
+        try {
+          // Get aggregated usage for this project
+          const projectUsage = await this.getProjectUsage(projectId);
+
+          const projectName = projectData?.project_info?.name || projectData?.name || 'Untitled Project';
+
+          projectsUsage.push({
+            id: projectId, // For dropdown filtering
+            project_id: projectId,
+            project_name: projectName,
+            name: projectName, // Alias for backward compatibility
+            total_tokens: projectUsage.total_tokens || 0,
+            total_messages: projectUsage.total_messages || 0,
+            total_sessions: projectUsage.total_sessions || 0,
+            prompt_tokens: projectUsage.prompt_tokens || 0,
+            completion_tokens: projectUsage.completion_tokens || 0,
+            cost: projectUsage.cost || 0,
+            active_agents: projectUsage.active_agents || 0
+          });
+        } catch (err) {
+          // If usage fetch fails, include project with zero usage
+          console.warn(`Failed to fetch usage for project ${projectId}:`, err);
+          projectsUsage.push({
+            id: projectId,
+            project_id: projectId,
+            project_name: projectData?.project_info?.name || projectData?.name || 'Untitled Project',
+            name: projectData?.project_info?.name || projectData?.name || 'Untitled Project',
+            total_tokens: 0,
+            total_messages: 0,
+            total_sessions: 0,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cost: 0,
+            active_agents: 0
+          });
+        }
+      }
+
+      // Sort by total_tokens descending
+      projectsUsage.sort((a, b) => (b.total_tokens || 0) - (a.total_tokens || 0));
+
+      return projectsUsage;
+    } catch (error) {
+      console.error('Error fetching organization projects usage:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get top agents across organization
+   */
+  async getOrganizationTopAgents(organizationId, limitCount = 10) {
+    try {
+      const usageQuery = query(
+        collection(db, this.collections.ORGANIZATIONS, organizationId, 'usage'),
+        orderBy('total_tokens', 'desc'),
+        firestoreLimit(limitCount)
+      );
+
+      const snapshot = await getDocs(usageQuery);
+      const topAgents = [];
+
+      for (const usageDoc of snapshot.docs) {
+        const usageData = usageDoc.data();
+
+        // Get agent name
+        try {
+          const agentRef = doc(db, this.collections.AGENTS, usageDoc.id);
+          const agentSnap = await getDoc(agentRef);
+          const agentName = agentSnap.exists()
+            ? (agentSnap.data()?.basic_info?.name || agentSnap.data()?.agent_info?.name || agentSnap.data()?.name || 'Untitled Agent')
+            : 'Unknown Agent';
+
+          topAgents.push({
+            agent_id: usageDoc.id,
+            agent_name: agentName,
+            total_tokens: usageData.total_tokens || 0,
+            total_messages: usageData.message_count || 0, // Map field name
+            total_sessions: usageData.session_count || 0, // Map field name
+            prompt_tokens: usageData.prompt_tokens || 0,
+            completion_tokens: usageData.completion_tokens || 0,
+            cost: usageData.cost || 0,
+            updated_at: usageData.updated_at
+          });
+        } catch (err) {
+          topAgents.push({
+            agent_id: usageDoc.id,
+            agent_name: 'Unknown Agent',
+            total_tokens: usageData.total_tokens || 0,
+            total_messages: usageData.message_count || 0,
+            total_sessions: usageData.session_count || 0
+          });
+        }
+      }
+
+      return topAgents;
+    } catch (error) {
+      console.error('Error fetching organization top agents:', error);
+      throw error;
+    }
+  }
+
+  // ========== PROJECT USAGE ==========
+
+  /**
+   * Get project-level usage analytics by aggregating all agent usage
+   */
+  async getProjectUsage(projectId) {
+    try {
+      const usageQuery = query(
+        collection(db, this.collections.PROJECTS, projectId, 'usage')
+      );
+
+      const snapshot = await getDocs(usageQuery);
+
+      // Initialize aggregated data
+      const aggregated = {
+        total_tokens: 0,
+        total_messages: 0,
+        total_sessions: 0,
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        cost: 0,
+        active_agents: snapshot.size,
+        agents: []
+      };
+
+      snapshot.forEach((usageDoc) => {
+        const data = usageDoc.data();
+
+        // Aggregate totals (note field name differences)
+        aggregated.total_tokens += data.total_tokens || 0;
+        aggregated.total_messages += data.message_count || 0; // Different field name
+        aggregated.total_sessions += data.session_count || 0; // Different field name
+        aggregated.prompt_tokens += data.prompt_tokens || 0;
+        aggregated.completion_tokens += data.completion_tokens || 0;
+        aggregated.cost += data.cost || 0;
+
+        // Store agent data for further analysis
+        aggregated.agents.push({
+          agent_id: usageDoc.id,
+          total_tokens: data.total_tokens || 0,
+          total_messages: data.message_count || 0,
+          total_sessions: data.session_count || 0,
+          updated_at: data.updated_at
+        });
+      });
+
+      return aggregated;
+    } catch (error) {
+      console.error('Error fetching project usage:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get agents usage within a project
+   */
+  async getProjectAgentsUsage(projectId) {
+    try {
+      const usageQuery = query(
+        collection(db, this.collections.PROJECTS, projectId, 'usage'),
+        orderBy('total_tokens', 'desc')
+      );
+
+      const snapshot = await getDocs(usageQuery);
+      const agentsUsage = [];
+
+      for (const usageDoc of snapshot.docs) {
+        const usageData = usageDoc.data();
+
+        // Get agent name and status
+        try {
+          const agentRef = doc(db, this.collections.AGENTS, usageDoc.id);
+          const agentSnap = await getDoc(agentRef);
+
+          if (agentSnap.exists()) {
+            const agentData = agentSnap.data();
+            const agentName = agentData?.basic_info?.name || agentData?.agent_info?.name || agentData?.name || 'Untitled Agent';
+            const agentStatus = agentData?.status || 'active';
+
+            agentsUsage.push({
+              id: usageDoc.id, // For dropdown filtering
+              agent_id: usageDoc.id,
+              agent_name: agentName,
+              name: agentName, // Alias for backward compatibility
+              status: agentStatus,
+              total_tokens: usageData.total_tokens || 0,
+              total_messages: usageData.message_count || 0, // Map field name
+              total_sessions: usageData.session_count || 0, // Map field name
+              prompt_tokens: usageData.prompt_tokens || 0,
+              completion_tokens: usageData.completion_tokens || 0,
+              cost: usageData.cost || 0,
+              updated_at: usageData.updated_at
+            });
+          } else {
+            // Agent document doesn't exist
+            agentsUsage.push({
+              id: usageDoc.id,
+              agent_id: usageDoc.id,
+              agent_name: 'Unknown Agent',
+              name: 'Unknown Agent',
+              status: 'unknown',
+              total_tokens: usageData.total_tokens || 0,
+              total_messages: usageData.message_count || 0,
+              total_sessions: usageData.session_count || 0
+            });
+          }
+        } catch (err) {
+          console.warn(`Failed to fetch agent details for ${usageDoc.id}:`, err);
+          agentsUsage.push({
+            id: usageDoc.id,
+            agent_id: usageDoc.id,
+            agent_name: 'Unknown Agent',
+            name: 'Unknown Agent',
+            status: 'error',
+            total_tokens: usageData.total_tokens || 0,
+            total_messages: usageData.message_count || 0,
+            total_sessions: usageData.session_count || 0
+          });
+        }
+      }
+
+      return agentsUsage;
+    } catch (error) {
+      console.error('Error fetching project agents usage:', error);
+      throw error;
+    }
+  }
+
+  // ========== AGENT USAGE ==========
+
+  /**
+   * Get agent-level usage analytics
+   */
+  async getAgentUsage(agentId) {
+    try {
+      const usageRef = doc(db, this.collections.AGENT_USAGE, agentId);
+      const usageSnap = await getDoc(usageRef);
+
+      if (!usageSnap.exists()) {
+        return {
+          total_tokens: 0,
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          total_messages: 0,
+          total_sessions: 0,
+          total_api_calls: 0,
+          cost: 0,
+          session_details: []
+        };
+      }
+
+      const data = usageSnap.data();
+
+      // Return with correct field names (agent_usage uses different field names)
+      return {
+        total_tokens: data.total_tokens || 0,
+        prompt_tokens: data.prompt_tokens || 0,
+        completion_tokens: data.completion_tokens || 0,
+        total_messages: data.total_messages || 0, // This field name is correct in agent_usage
+        total_sessions: data.total_sessions || 0, // This field name is correct in agent_usage
+        total_api_calls: data.total_api_calls || 0,
+        cost: data.cost || 0,
+        updated_at: data.updated_at,
+        created_at: data.created_at
+      };
+    } catch (error) {
+      console.error('Error fetching agent usage:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get all agents usage for an organization (across all projects)
+   */
+  async getOrganizationAgentsUsage(organizationId) {
+    try {
+      // Get all agents in the organization from all projects
+      const projectsQuery = query(
+        collection(db, this.collections.PROJECTS),
+        where('organization_id', '==', organizationId)
+      );
+
+      const projectsSnapshot = await getDocs(projectsQuery);
+      const allAgents = [];
+
+      // For each project, get its agents usage
+      for (const projectDoc of projectsSnapshot.docs) {
+        const projectId = projectDoc.id;
+        try {
+          const projectAgents = await this.getProjectAgentsUsage(projectId);
+          allAgents.push(...projectAgents);
+        } catch (err) {
+          console.warn(`Failed to fetch agents for project ${projectId}:`, err);
+        }
+      }
+
+      // Remove duplicates and merge data for agents that appear in multiple projects
+      const uniqueAgents = allAgents.reduce((acc, agent) => {
+        const existingAgent = acc.find(a => a.agent_id === agent.agent_id);
+        if (existingAgent) {
+          // Merge usage data
+          existingAgent.total_tokens += agent.total_tokens || 0;
+          existingAgent.total_messages += agent.total_messages || 0;
+          existingAgent.total_sessions += agent.total_sessions || 0;
+          existingAgent.prompt_tokens += agent.prompt_tokens || 0;
+          existingAgent.completion_tokens += agent.completion_tokens || 0;
+          existingAgent.cost += agent.cost || 0;
+        } else {
+          acc.push({ ...agent });
+        }
+        return acc;
+      }, []);
+
+      // Sort by total_tokens descending
+      uniqueAgents.sort((a, b) => (b.total_tokens || 0) - (a.total_tokens || 0));
+
+      return uniqueAgents;
+    } catch (error) {
+      console.error('Error fetching organization agents usage:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get organization usage data for a specific month
+   */
+  async getOrganizationUsageByMonth(organizationId, selectedMonth) {
+    try {
+      // Step 1: Query agents by organization_id
+      const agentsQuery = query(
+        collection(db, this.collections.AGENTS),
+        where('organization_id', '==', organizationId)
+      );
+
+      const agentsSnapshot = await getDocs(agentsQuery);
+      const agentIds = [];
+      const agentsList = [];
+
+      agentsSnapshot.forEach(doc => {
+        agentIds.push(doc.id);
+        agentsList.push({
+          agent_id: doc.id,
+          agent_name: doc.data().name || 'Unnamed Agent'
+        });
+      });
+
+      console.log(`Found ${agentIds.length} agents for organization ${organizationId}`);
+
+      // Step 2: Aggregate monthly data from all agents
+      let totalTokens = 0;
+      let totalMessages = 0;
+      let totalSessions = 0;
+      let totalCost = 0;
+      const allDailyData = {};
+
+      for (const agentId of agentIds) {
+        try {
+          const apiCallsData = await this.getAgentApiCalls(agentId, { selectedMonth });
+          const sessions = await this.getAgentSessions(agentId, selectedMonth);
+
+          totalTokens += apiCallsData.monthlySummary.total_tokens;
+          totalCost += apiCallsData.monthlySummary.total_cost;
+          totalSessions += sessions.length;
+          totalMessages += sessions.reduce((sum, s) => sum + (s.total_messages || 0), 0);
+
+          // Merge daily data
+          apiCallsData.trendData.daily.forEach(day => {
+            if (!allDailyData[day.date]) {
+              allDailyData[day.date] = {
+                date: day.date,
+                total_tokens: 0,
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                cost: 0,
+                api_calls: 0,
+                messages: 0,
+                sessions: 0
+              };
+            }
+
+            allDailyData[day.date].total_tokens += day.total_tokens;
+            allDailyData[day.date].prompt_tokens += day.prompt_tokens;
+            allDailyData[day.date].completion_tokens += day.completion_tokens;
+            allDailyData[day.date].cost += day.cost;
+            allDailyData[day.date].api_calls += day.api_calls;
+            allDailyData[day.date].messages += day.messages || 0;
+            allDailyData[day.date].sessions += day.sessions || 0;
+          });
+        } catch (err) {
+          console.warn(`Failed to fetch monthly usage for agent ${agentId}:`, err);
+        }
+      }
+
+      // Step 3: Sort daily data
+      const dailyArray = Object.values(allDailyData).sort((a, b) =>
+        new Date(a.date) - new Date(b.date)
+      );
+
+      return {
+        monthlyMetrics: {
+          total_tokens: totalTokens,
+          total_messages: totalMessages,
+          total_sessions: totalSessions,
+          cost: totalCost,
+          total_agents: agentIds.length,
+          avg_messages_per_session: totalSessions > 0 ? totalMessages / totalSessions : 0,
+          avg_tokens_per_session: totalSessions > 0 ? totalTokens / totalSessions : 0,
+          avg_cost_per_session: totalSessions > 0 ? totalCost / totalSessions : 0
+        },
+        trendData: {
+          daily: dailyArray
+        },
+        agents: agentsList
+      };
+    } catch (error) {
+      console.error('Error fetching organization monthly usage:', error);
+      return {
+        monthlyMetrics: {
+          total_tokens: 0,
+          total_messages: 0,
+          total_sessions: 0,
+          cost: 0,
+          total_agents: 0,
+          avg_messages_per_session: 0,
+          avg_tokens_per_session: 0,
+          avg_cost_per_session: 0
+        },
+        trendData: { daily: [] },
+        agents: []
+      };
+    }
+  }
+
+  /**
+   * Get project usage data for a specific month
+   */
+  async getProjectUsageByMonth(projectId, selectedMonth) {
+    try {
+      // Step 1: Query agents by project_id
+      const agentsQuery = query(
+        collection(db, this.collections.AGENTS),
+        where('project_id', '==', projectId)
+      );
+
+      const agentsSnapshot = await getDocs(agentsQuery);
+      const agentIds = [];
+      const agentsList = [];
+
+      agentsSnapshot.forEach(doc => {
+        agentIds.push(doc.id);
+        agentsList.push({
+          agent_id: doc.id,
+          agent_name: doc.data().name || 'Unnamed Agent'
+        });
+      });
+
+      console.log(`Found ${agentIds.length} agents for project ${projectId}`);
+
+      // Step 2: Aggregate monthly data from all agents
+      let totalTokens = 0;
+      let totalMessages = 0;
+      let totalSessions = 0;
+      let totalCost = 0;
+      const allDailyData = {};
+
+      for (const agentId of agentIds) {
+        try {
+          const apiCallsData = await this.getAgentApiCalls(agentId, { selectedMonth });
+          const sessions = await this.getAgentSessions(agentId, selectedMonth);
+
+          totalTokens += apiCallsData.monthlySummary.total_tokens;
+          totalCost += apiCallsData.monthlySummary.total_cost;
+          totalSessions += sessions.length;
+          totalMessages += sessions.reduce((sum, s) => sum + (s.total_messages || 0), 0);
+
+          // Merge daily data
+          apiCallsData.trendData.daily.forEach(day => {
+            if (!allDailyData[day.date]) {
+              allDailyData[day.date] = {
+                date: day.date,
+                total_tokens: 0,
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                cost: 0,
+                api_calls: 0,
+                messages: 0,
+                sessions: 0
+              };
+            }
+
+            allDailyData[day.date].total_tokens += day.total_tokens;
+            allDailyData[day.date].prompt_tokens += day.prompt_tokens;
+            allDailyData[day.date].completion_tokens += day.completion_tokens;
+            allDailyData[day.date].cost += day.cost;
+            allDailyData[day.date].api_calls += day.api_calls;
+            allDailyData[day.date].messages += day.messages || 0;
+            allDailyData[day.date].sessions += day.sessions || 0;
+          });
+        } catch (err) {
+          console.warn(`Failed to fetch monthly usage for agent ${agentId}:`, err);
+        }
+      }
+
+      // Step 3: Sort daily data
+      const dailyArray = Object.values(allDailyData).sort((a, b) =>
+        new Date(a.date) - new Date(b.date)
+      );
+
+      return {
+        monthlyMetrics: {
+          total_tokens: totalTokens,
+          total_messages: totalMessages,
+          total_sessions: totalSessions,
+          cost: totalCost,
+          total_agents: agentIds.length,
+          avg_messages_per_session: totalSessions > 0 ? totalMessages / totalSessions : 0,
+          avg_tokens_per_session: totalSessions > 0 ? totalTokens / totalSessions : 0,
+          avg_cost_per_session: totalSessions > 0 ? totalCost / totalSessions : 0
+        },
+        trendData: {
+          daily: dailyArray
+        },
+        agents: agentsList
+      };
+    } catch (error) {
+      console.error('Error fetching project monthly usage:', error);
+      return {
+        monthlyMetrics: {
+          total_tokens: 0,
+          total_messages: 0,
+          total_sessions: 0,
+          cost: 0,
+          total_agents: 0,
+          avg_messages_per_session: 0,
+          avg_tokens_per_session: 0,
+          avg_cost_per_session: 0
+        },
+        trendData: { daily: [] },
+        agents: []
+      };
+    }
+  }
+
+  /**
+   * Get organization agents usage for a specific month
+   */
+  async getOrganizationAgentsUsageByMonth(organizationId, selectedMonth) {
+    try {
+      // Get all agents in the organization
+      const projectsQuery = query(
+        collection(db, this.collections.PROJECTS),
+        where('organization_id', '==', organizationId)
+      );
+
+      const projectsSnapshot = await getDocs(projectsQuery);
+      const agentIds = new Set();
+
+      // Collect all agent IDs from all projects
+      for (const projectDoc of projectsSnapshot.docs) {
+        const projectId = projectDoc.id;
+        const agentsQuery = query(
+          collection(db, this.collections.AGENTS),
+          where('project_id', '==', projectId)
+        );
+        const agentsSnapshot = await getDocs(agentsQuery);
+        agentsSnapshot.forEach(agentDoc => agentIds.add(agentDoc.id));
+      }
+
+      // Get monthly usage for each agent
+      const agentsMonthlyUsage = [];
+
+      for (const agentId of agentIds) {
+        try {
+          const apiCallsData = await this.getAgentApiCalls(agentId, { selectedMonth });
+          const sessions = await this.getAgentSessions(agentId, selectedMonth);
+
+          // Get agent details
+          const agentDoc = await getDoc(doc(db, this.collections.AGENTS, agentId));
+          const agentData = agentDoc.exists() ? agentDoc.data() : {};
+
+          agentsMonthlyUsage.push({
+            agent_id: agentId,
+            agent_name: agentData.name || 'Unnamed Agent',
+            total_tokens: apiCallsData.monthlySummary.total_tokens,
+            total_messages: sessions.reduce((sum, s) => sum + (s.total_messages || 0), 0),
+            total_sessions: sessions.length,
+            cost: apiCallsData.monthlySummary.total_cost,
+            status: agentData.status || 'active'
+          });
+        } catch (err) {
+          console.warn(`Failed to fetch monthly usage for agent ${agentId}:`, err);
+        }
+      }
+
+      // Sort by total_tokens descending
+      agentsMonthlyUsage.sort((a, b) => (b.total_tokens || 0) - (a.total_tokens || 0));
+
+      return agentsMonthlyUsage;
+    } catch (error) {
+      console.error('Error fetching organization agents monthly usage:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get agents usage within a project for a specific month
+   * Uses pre-aggregated data from projects/{project_id}/usage/{month}/agents subcollection
+   */
+  async getProjectAgentsUsageByMonth(projectId, selectedMonth) {
+    try {
+      console.log(`🔥 Fetching project agents usage: ${projectId}, month: ${selectedMonth}`);
+
+      // Query pre-aggregated agents subcollection
+      // Path: projects/{project_id}/usage/{month}/agents
+      const agentsQuery = query(
+        collection(db, this.collections.PROJECTS, projectId, 'usage', selectedMonth, 'agents'),
+        orderBy('total_tokens', 'desc')
+      );
+
+      const agentsSnapshot = await getDocs(agentsQuery);
+      const agentsMonthlyUsage = [];
+
+      agentsSnapshot.forEach(agentDoc => {
+        const data = agentDoc.data();
+        agentsMonthlyUsage.push({
+          agent_id: data.agent_id || agentDoc.id,
+          agent_name: data.agent_name || 'Unknown Agent',
+          name: data.agent_name || 'Unknown Agent',
+          total_tokens: data.total_tokens || 0,
+          total_messages: data.total_messages || 0,
+          total_sessions: data.total_sessions || 0,
+          cost: data.total_cost || 0,
+          status: 'active'
+        });
+      });
+
+      console.log(`✅ Fetched ${agentsMonthlyUsage.length} agents for project ${projectId}`);
+      return agentsMonthlyUsage;
+    } catch (error) {
+      console.error('Error fetching project agents monthly usage:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get session-level usage for a specific agent
+   */
+  async getAgentSessions(agentId, selectedMonth = null) {
+    try {
+      let sessionsQuery;
+
+      if (selectedMonth) {
+        // Filter by selected month
+        const [year, month] = selectedMonth.split('-').map(Number);
+        const startDate = Timestamp.fromDate(new Date(year, month - 1, 1, 0, 0, 0, 0));
+        const endDate = Timestamp.fromDate(new Date(year, month, 0, 23, 59, 59, 999));
+
+        sessionsQuery = query(
+          collection(db, this.collections.AGENT_SESSIONS),
+          where('agent_id', '==', agentId),
+          where('created_at', '>=', startDate),
+          where('created_at', '<=', endDate),
+          orderBy('created_at', 'desc')
+        );
+      } else {
+        // Fetch all sessions
+        sessionsQuery = query(
+          collection(db, this.collections.AGENT_SESSIONS),
+          where('agent_id', '==', agentId),
+          orderBy('created_at', 'desc')
+        );
+      }
+
+      const snapshot = await getDocs(sessionsQuery);
+      const sessions = [];
+
+      for (const sessionDoc of snapshot.docs) {
+        const sessionData = sessionDoc.data();
+
+        // Get message count for this session
+        const messagesQuery = query(
+          collection(db, this.collections.AGENT_SESSIONS, sessionDoc.id, 'messages')
+        );
+        const messagesSnapshot = await getDocs(messagesQuery);
+
+        sessions.push({
+          id: sessionDoc.id,
+          session_id: sessionDoc.id,
+          agent_id: agentId,
+          name: sessionData.session_name || sessionData.title || `Session ${sessionDoc.id.substring(0, 8)}`,
+          session_name: sessionData.session_name || sessionData.title || `Session ${sessionDoc.id.substring(0, 8)}`,
+          message_count: messagesSnapshot.size,
+          total_messages: messagesSnapshot.size,
+          total_tokens: sessionData.total_tokens || 0,
+          prompt_tokens: sessionData.prompt_tokens || 0,
+          completion_tokens: sessionData.completion_tokens || 0,
+          cost: sessionData.cost || 0,
+          status: sessionData.status || 'active',
+          created_at: sessionData.created_at,
+          updated_at: sessionData.updated_at || sessionData.created_at
+        });
+      }
+
+      return sessions;
+    } catch (error) {
+      console.error('Error fetching agent sessions:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get API calls for an agent with time-series data
+   */
+  async getAgentApiCalls(agentId, options = {}) {
+    try {
+      const { selectedMonth = null } = options;
+
+      if (!selectedMonth) {
+        console.warn('getAgentApiCalls requires selectedMonth parameter');
+        return {
+          apiCalls: [],
+          trendData: { daily: [] },
+          monthlySummary: {
+            total_tokens: 0,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_cost: 0,
+            total_sessions: 0,
+            total_messages: 0,
+            total_api_calls: 0
+          }
+        };
+      }
+
+      console.log(`📊 Fetching agent usage for ${agentId}, month: ${selectedMonth}`);
+
+      // Query monthly summary from agents/{agentId}/usage/{month}
+      const usageDocRef = doc(db, this.collections.AGENTS, agentId, 'usage', selectedMonth);
+      const usageDoc = await getDoc(usageDocRef);
+
+      if (!usageDoc.exists()) {
+        console.warn(`No usage data found for agent ${agentId} in ${selectedMonth}`);
+
+        // Return empty data structure
+        return {
+          apiCalls: [],
+          trendData: { daily: [] },
+          monthlySummary: {
+            total_tokens: 0,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_cost: 0,
+            total_sessions: 0,
+            total_messages: 0,
+            total_api_calls: 0
+          }
+        };
+      }
+
+      const usageData = usageDoc.data();
+      console.log('✅ Found monthly usage data:', usageData);
+
+      // Extract monthly metrics
+      const totalTokens = usageData.total_tokens || 0;
+      const promptTokens = usageData.prompt_tokens || 0;
+      const completionTokens = usageData.completion_tokens || 0;
+      const totalCost = usageData.total_cost || 0;
+      const totalSessions = usageData.total_sessions || 0;
+      const totalMessages = usageData.total_messages || 0;
+
+      // Query daily breakdown from subcollection
+      const dailyBreakdownQuery = query(
+        collection(db, this.collections.AGENTS, agentId, 'usage', selectedMonth, 'daily-breakdown'),
+        orderBy('date', 'asc')
+      );
+      const dailySnapshot = await getDocs(dailyBreakdownQuery);
+
+      const dailyArray = [];
+      dailySnapshot.forEach(dayDoc => {
+        const data = dayDoc.data();
+        dailyArray.push({
+          date: data.date || dayDoc.id,
+          total_tokens: data.total_tokens || 0,
+          prompt_tokens: data.prompt_tokens || 0,
+          completion_tokens: data.completion_tokens || 0,
+          cost: data.total_cost || 0,
+          messages: data.messages || 0,
+          sessions: data.sessions || 0
+        });
+      });
+
+      console.log('=== Agent Monthly Metrics ===');
+      console.log('Total Messages:', totalMessages);
+      console.log('Total Sessions:', totalSessions);
+      console.log('Total Tokens:', totalTokens);
+      console.log('Total Cost:', totalCost);
+      console.log('Daily trend points:', dailyArray.length);
+
+      return {
+        apiCalls: [],
+        trendData: { daily: dailyArray },
+        monthlySummary: {
+          total_tokens: totalTokens,
+          prompt_tokens: promptTokens,
+          completion_tokens: completionTokens,
+          total_cost: totalCost,
+          total_sessions: totalSessions,
+          total_messages: totalMessages,
+          total_api_calls: dailyArray.reduce((sum, day) => sum + (day.api_calls || 0), 0)
+        }
+      };
+    } catch (error) {
+      console.error('Error fetching agent API calls:', error);
+      return {
+        apiCalls: [],
+        trendData: { daily: [], weekly: [], monthly: [] },
+        monthlySummary: {
+          total_tokens: 0,
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          total_cost: 0,
+          total_api_calls: 0
+        }
+      };
+    }
+  }
+
+  /**
+   * Generate months from agent creation date to current date
+   */
+  async generateAvailableMonths(agentId) {
+    try {
+      // Get agent creation date
+      const agentDoc = await getDoc(doc(db, this.collections.AGENTS, agentId));
+
+      if (!agentDoc.exists()) {
+        return [];
+      }
+
+      const agentData = agentDoc.data();
+      const createdAt = agentData.created_at?.toDate ? agentData.created_at.toDate() : new Date(agentData.created_at || Date.now());
+
+      // Generate months from creation to now
+      const months = [];
+      const currentDate = new Date();
+      const startDate = new Date(createdAt.getFullYear(), createdAt.getMonth(), 1);
+
+      let iterDate = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
+
+      while (iterDate >= startDate) {
+        const monthKey = `${iterDate.getFullYear()}-${String(iterDate.getMonth() + 1).padStart(2, '0')}`;
+        const monthName = iterDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+
+        months.push({
+          value: monthKey,
+          label: monthName
+        });
+
+        // Move to previous month
+        iterDate.setMonth(iterDate.getMonth() - 1);
+      }
+
+      return months;
+    } catch (error) {
+      console.error('Error generating available months:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Generate months from organization creation date to current date
+   */
+  async generateAvailableMonthsForOrganization(organizationId) {
+    try {
+      // Get organization creation date
+      const orgDoc = await getDoc(doc(db, this.collections.ORGANIZATIONS, organizationId));
+
+      if (!orgDoc.exists()) {
+        return [];
+      }
+
+      const orgData = orgDoc.data();
+      const createdAt = orgData.created_at?.toDate ? orgData.created_at.toDate() : new Date(orgData.created_at || Date.now());
+
+      // Generate months from creation to now
+      const months = [];
+      const currentDate = new Date();
+      const startDate = new Date(createdAt.getFullYear(), createdAt.getMonth(), 1);
+
+      let iterDate = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
+
+      while (iterDate >= startDate) {
+        const monthKey = `${iterDate.getFullYear()}-${String(iterDate.getMonth() + 1).padStart(2, '0')}`;
+        const monthName = iterDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+
+        months.push({
+          value: monthKey,
+          label: monthName
+        });
+
+        // Move to previous month
+        iterDate.setMonth(iterDate.getMonth() - 1);
+      }
+
+      return months;
+    } catch (error) {
+      console.error('Error generating available months for organization:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Generate months from project creation date to current date
+   */
+  async generateAvailableMonthsForProject(projectId) {
+    try {
+      // Get project creation date
+      const projectDoc = await getDoc(doc(db, this.collections.PROJECTS, projectId));
+
+      if (!projectDoc.exists()) {
+        return [];
+      }
+
+      const projectData = projectDoc.data();
+      const createdAt = projectData.created_at?.toDate ? projectData.created_at.toDate() : new Date(projectData.created_at || Date.now());
+
+      // Generate months from creation to now
+      const months = [];
+      const currentDate = new Date();
+      const startDate = new Date(createdAt.getFullYear(), createdAt.getMonth(), 1);
+
+      let iterDate = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
+
+      while (iterDate >= startDate) {
+        const monthKey = `${iterDate.getFullYear()}-${String(iterDate.getMonth() + 1).padStart(2, '0')}`;
+        const monthName = iterDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+
+        months.push({
+          value: monthKey,
+          label: monthName
+        });
+
+        // Move to previous month
+        iterDate.setMonth(iterDate.getMonth() - 1);
+      }
+
+      return months;
+    } catch (error) {
+      console.error('Error generating available months for project:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Aggregate API calls data by date for trend analysis
+   */
+  aggregateApiCallsByDate(apiCalls, selectedMonth = null) {
+    const aggregation = {};
+
+    apiCalls.forEach(call => {
+      if (!call.created_at) return;
+
+      const date = call.created_at.toDate ? call.created_at.toDate() : new Date(call.created_at);
+      const dateKey = date.toISOString().split('T')[0]; // YYYY-MM-DD
+
+      if (!aggregation[dateKey]) {
+        aggregation[dateKey] = {
+          date: dateKey,
+          total_tokens: 0,
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          cost: 0,
+          api_calls: 0
+        };
+      }
+
+      aggregation[dateKey].total_tokens += call.total_tokens;
+      aggregation[dateKey].prompt_tokens += call.prompt_tokens;
+      aggregation[dateKey].completion_tokens += call.completion_tokens;
+      aggregation[dateKey].cost += call.cost_usd;
+      aggregation[dateKey].api_calls += 1;
+    });
+
+    // Convert to array and sort by date
+    let dailyData = Object.values(aggregation).sort((a, b) =>
+      new Date(a.date) - new Date(b.date)
+    );
+
+    // Fill missing dates with zeros if selectedMonth is provided
+    if (selectedMonth) {
+      dailyData = this.fillMissingDatesInMonth(dailyData, selectedMonth);
+    }
+
+    return {
+      daily: dailyData,
+      weekly: this.aggregateToWeekly(dailyData),
+      monthly: this.aggregateToMonthly(dailyData)
+    };
+  }
+
+  /**
+   * Fill missing dates in a month with zero values
+   */
+  fillMissingDatesInMonth(dailyData, selectedMonth) {
+    // Parse selected month (format: "2025-01")
+    const [year, month] = selectedMonth.split('-').map(Number);
+
+    // Get first and last day of the month
+    const firstDay = new Date(year, month - 1, 1);
+    const lastDay = new Date(year, month, 0); // Day 0 of next month = last day of current month
+
+    // Create a map of existing data - only include dates from selected month
+    const dataMap = {};
+    dailyData.forEach(day => {
+      const dayMonth = day.date.substring(0, 7); // Extract "YYYY-MM" from "YYYY-MM-DD"
+      if (dayMonth === selectedMonth) {
+        dataMap[day.date] = day;
+      }
+    });
+
+    // Generate all dates in the month
+    const completeData = [];
+    const currentDate = new Date(firstDay);
+
+    while (currentDate <= lastDay) {
+      const dateKey = currentDate.toISOString().split('T')[0];
+
+      if (dataMap[dateKey]) {
+        // Data exists for this date
+        completeData.push(dataMap[dateKey]);
+      } else {
+        // No data for this date, fill with zeros
+        completeData.push({
+          date: dateKey,
+          total_tokens: 0,
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          cost: 0,
+          api_calls: 0
+        });
+      }
+
+      // Move to next day
+      currentDate.setDate(currentDate.getDate() + 1);
+    }
+
+    return completeData;
+  }
+
+  /**
+   * Aggregate daily data to weekly
+   */
+  aggregateToWeekly(dailyData) {
+    const weekly = {};
+
+    dailyData.forEach(day => {
+      const date = new Date(day.date);
+      const weekKey = this.getWeekKey(date);
+
+      if (!weekly[weekKey]) {
+        weekly[weekKey] = {
+          date: weekKey,
+          total_tokens: 0,
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          cost: 0,
+          api_calls: 0
+        };
+      }
+
+      weekly[weekKey].total_tokens += day.total_tokens;
+      weekly[weekKey].prompt_tokens += day.prompt_tokens;
+      weekly[weekKey].completion_tokens += day.completion_tokens;
+      weekly[weekKey].cost += day.cost;
+      weekly[weekKey].api_calls += day.api_calls;
+    });
+
+    return Object.values(weekly).sort((a, b) => new Date(a.date) - new Date(b.date));
+  }
+
+  /**
+   * Aggregate daily data to monthly
+   */
+  aggregateToMonthly(dailyData) {
+    const monthly = {};
+
+    dailyData.forEach(day => {
+      const date = new Date(day.date);
+      const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+
+      if (!monthly[monthKey]) {
+        monthly[monthKey] = {
+          date: monthKey + '-01',
+          total_tokens: 0,
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          cost: 0,
+          api_calls: 0
+        };
+      }
+
+      monthly[monthKey].total_tokens += day.total_tokens;
+      monthly[monthKey].prompt_tokens += day.prompt_tokens;
+      monthly[monthKey].completion_tokens += day.completion_tokens;
+      monthly[monthKey].cost += day.cost;
+      monthly[monthKey].api_calls += day.api_calls;
+    });
+
+    return Object.values(monthly).sort((a, b) => new Date(a.date) - new Date(b.date));
+  }
+
+  /**
+   * Get week key for aggregation (ISO week)
+   */
+  getWeekKey(date) {
+    const d = new Date(date);
+    d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() + 4 - (d.getDay() || 7));
+    const yearStart = new Date(d.getFullYear(), 0, 1);
+    const weekNo = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+    return `${d.getFullYear()}-W${String(weekNo).padStart(2, '0')}`;
+  }
+
+  // ========== UTILITY METHODS ==========
+
+  /**
+   * Format usage data for display
+   */
+  formatUsageData(usageData) {
+    return {
+      ...usageData,
+      total_tokens: usageData.total_tokens || 0,
+      total_messages: usageData.total_messages || 0,
+      total_sessions: usageData.total_sessions || 0,
+      formatted_tokens: this.formatNumber(usageData.total_tokens || 0),
+      formatted_messages: this.formatNumber(usageData.total_messages || 0),
+      formatted_sessions: this.formatNumber(usageData.total_sessions || 0)
+    };
+  }
+
+  /**
+   * Format large numbers for display
+   */
+  formatNumber(num) {
+    if (num >= 1000000) {
+      return (num / 1000000).toFixed(1) + 'M';
+    } else if (num >= 1000) {
+      return (num / 1000).toFixed(1) + 'K';
+    }
+    return num.toString();
+  }
+
+  /**
+   * Get usage trend data for charts
+   */
+  getUsageTrend(usageData, period = 'daily') {
+    const periodData = usageData[`${period}_usage`] || {};
+
+    return Object.entries(periodData)
+      .sort(([a], [b]) => new Date(a) - new Date(b))
+      .map(([date, usage]) => ({
+        date,
+        usage: usage.total_tokens || 0,
+        messages: usage.total_messages || 0,
+        sessions: usage.total_sessions || 0
+      }));
+  }
+
+  /**
+   * Calculate usage percentage for progress bars
+   */
+  calculateUsagePercentage(current, quota) {
+    if (!quota || quota === 0) return 0;
+    return Math.min((current / quota) * 100, 100);
+  }
+
+  /**
+   * Real-time usage listener
+   */
+  subscribeToUsage(type, id, callback) {
+    switch (type) {
+      case 'organization':
+        // Listen to all agents usage in organization
+        const orgUsageQuery = query(
+          collection(db, this.collections.ORGANIZATIONS, id, 'usage')
+        );
+        return onSnapshot(orgUsageQuery, (snapshot) => {
+          this.getOrganizationUsage(id).then(callback).catch(console.error);
+        });
+
+      case 'project':
+        // Listen to all agents usage in project
+        const projectUsageQuery = query(
+          collection(db, this.collections.PROJECTS, id, 'usage')
+        );
+        return onSnapshot(projectUsageQuery, (snapshot) => {
+          this.getProjectUsage(id).then(callback).catch(console.error);
+        });
+
+      case 'agent':
+        // Listen to specific agent usage
+        const usageRef = doc(db, this.collections.AGENT_USAGE, id);
+        return onSnapshot(usageRef, (docSnap) => {
+          if (docSnap.exists()) {
+            callback(this.formatUsageData(docSnap.data()));
+          } else {
+            callback(this.formatUsageData({}));
+          }
+        });
+
+      default:
+        throw new Error(`Invalid usage type: ${type}`);
+    }
+  }
+}
+
+// Export singleton instance
+export const usageService = new UsageService();
+export default usageService;

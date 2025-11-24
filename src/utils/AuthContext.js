@@ -1,0 +1,624 @@
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import {
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  signOut,
+  sendPasswordResetEmail,
+  GoogleAuthProvider,
+  signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
+  setPersistence,
+  browserLocalPersistence
+} from 'firebase/auth';
+import { auth } from './firebase';
+import loggingClient from '../services/logging/loggingClient';
+// import invitationService from '../services/invitations/invitationService'; // REMOVED: Invitation service deleted
+import FullScreenLoadingPage from '../components/shared/FullScreenLoadingPage';
+
+// Create context
+const AuthContext = createContext();
+
+// Export the context itself for DashboardProvider
+export { AuthContext };
+
+// Custom hook to use the auth context
+export const useAuth = () => {
+  return useContext(AuthContext);
+};
+
+// Provider component
+export const AuthProvider = ({ children }) => {
+  const [currentUser, setCurrentUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  // User state
+  const [userRole, setUserRole] = useState(null);
+  const [hasCompletedOnboarding, setHasCompletedOnboarding] = useState(false);
+
+  // Project state
+  const [currentProject, setCurrentProject] = useState(null);
+
+  // Invitation state
+  const [pendingInvitations, setPendingInvitations] = useState([]);
+  const [pendingInvitationsCount, setPendingInvitationsCount] = useState(0);
+
+  // Ref to track invitation listener unsubscribe function
+  const invitationListenerRef = useRef(null);
+  // Ref to track previous invitation count for detecting new invitations
+  const previousInvitationCountRef = useRef(0);
+
+  // Set up persistence to LOCAL (survives browser restarts)
+  useEffect(() => {
+    const setupPersistence = async () => {
+      try {
+        console.log("Setting Firebase auth persistence to LOCAL");
+        await setPersistence(auth, browserLocalPersistence);
+        console.log("Firebase persistence set successfully");
+      } catch (error) {
+        console.error("Error setting persistence:", error);
+      }
+    };
+    
+    setupPersistence();
+  }, []);
+
+  // Sign in with email and password
+  const login = async (email, password) => {
+    setError('');
+    try {
+      console.log("Logging in with email/password");
+      const result = await signInWithEmailAndPassword(auth, email, password);
+      console.log("Login successful:", result.user.email);
+      
+      // Log successful login
+      console.log('User logged in successfully:', result.user.email);
+      
+      return result;
+    } catch (error) {
+      console.error("Login error:", error);
+      setError(error.message || "Failed to sign in");
+      throw error;
+    }
+  };
+
+  // Sign up with email and password
+  const signup = async (email, password) => {
+    try {
+      const result = await createUserWithEmailAndPassword(auth, email, password);
+      
+      // REMOVED: User profile service deleted
+      // TODO: Replace with backend API call if needed
+      console.log('User profile creation skipped (service removed)');
+      // try {
+      //   const { saveUserProfile } = await import('../services/users/userProfileService');
+      //   await saveUserProfile(result.user.uid, {
+      //     email: result.user.email,
+      //     displayName: result.user.displayName || result.user.email?.split('@')[0] || 'User',
+      //     profilePictureUrl: result.user.photoURL || ''
+      //   });
+      //   console.log('Basic user profile created successfully');
+      // } catch (profileError) {
+      //   console.warn('Failed to create initial user profile:', profileError);
+      //   // Don't fail signup if profile creation fails - onboarding can handle it
+      // }
+
+      return result;
+    } catch (error) {
+      throw error;
+    }
+  };
+
+  // Sign in with Google popup
+  const signInWithGoogle = async () => {
+    setError('');
+    try {
+      // ============ DEBUGGING: Log environment details ============
+      console.log("========================================");
+      console.log("🔍 FIREBASE AUTH DEBUGGING");
+      console.log("========================================");
+      console.log("📍 Current Location:");
+      console.log("  - Full URL:", window.location.href);
+      console.log("  - Hostname:", window.location.hostname);
+      console.log("  - Protocol:", window.location.protocol);
+      console.log("  - Port:", window.location.port);
+      console.log("  - Origin:", window.location.origin);
+      console.log("");
+      console.log("🔧 Firebase Configuration:");
+      console.log("  - API Key:", process.env.REACT_APP_FIREBASE_API_KEY?.substring(0, 20) + "...");
+      console.log("  - Auth Domain:", process.env.REACT_APP_FIREBASE_AUTH_DOMAIN);
+      console.log("  - Project ID:", process.env.REACT_APP_FIREBASE_PROJECT_ID);
+      console.log("");
+      console.log("⚡ Expected Domain for Authorization:");
+      console.log("  - Should match hostname:", window.location.hostname);
+      console.log("  - Or be 'localhost' if running locally");
+      console.log("========================================");
+
+      const provider = new GoogleAuthProvider();
+      // Add scopes if needed
+      provider.addScope('https://www.googleapis.com/auth/userinfo.email');
+      provider.addScope('https://www.googleapis.com/auth/userinfo.profile');
+
+      // Optional: Specify additional OAuth parameters
+      provider.setCustomParameters({
+        prompt: 'select_account'
+      });
+
+      console.log("Starting Google Sign-In with popup");
+      console.log("⏳ Attempting popup flow first...");
+      const result = await signInWithPopup(auth, provider);
+
+      // The signed-in user info
+      const user = result.user;
+      console.log("Google Sign-In successful:", user.email);
+      
+      // REMOVED: User profile service deleted
+      // TODO: Replace with backend API call if needed
+      console.log('Google user profile creation/update skipped (service removed)');
+      // try {
+      //   const { saveUserProfile, getUserProfile } = await import('../services/users/userProfileService');
+      //   const existingProfile = await getUserProfile(user.uid);
+      //   // ... profile creation logic
+      //   await saveUserProfile(user.uid, profileData);
+      //   console.log('Google user profile created/updated successfully');
+      // } catch (profileError) {
+      //   console.warn('Failed to create/update Google user profile:', profileError);
+      // }
+      
+      return result;
+    } catch (error) {
+      // ============ ENHANCED ERROR DEBUGGING ============
+      console.error("========================================");
+      console.error("❌ GOOGLE SIGN-IN ERROR DETAILS");
+      console.error("========================================");
+      console.error("🔴 Error Code:", error.code);
+      console.error("🔴 Error Message:", error.message);
+      console.error("🔴 Full Error Object:", error);
+      console.error("");
+      console.error("📧 User Email (if available):", error.customData?.email);
+      console.error("🔑 Credential Info:", GoogleAuthProvider.credentialFromError(error));
+      console.error("");
+
+      if (error.code === 'auth/unauthorized-domain') {
+        console.error("🚨 UNAUTHORIZED DOMAIN ERROR DETECTED!");
+        console.error("========================================");
+        console.error("This means your current domain is not authorized in Firebase Console.");
+        console.error("");
+        console.error("📍 Current Domain:", window.location.hostname);
+        console.error("🔧 Firebase Auth Domain:", process.env.REACT_APP_FIREBASE_AUTH_DOMAIN);
+        console.error("🆔 Firebase Project ID:", process.env.REACT_APP_FIREBASE_PROJECT_ID);
+        console.error("");
+        console.error("✅ TO FIX THIS:");
+        console.error("1. Go to: https://console.firebase.google.com/");
+        console.error(`2. Select project: ${process.env.REACT_APP_FIREBASE_PROJECT_ID}`);
+        console.error("3. Go to: Authentication → Settings → Authorized domains");
+        console.error(`4. Add this domain: ${window.location.hostname}`);
+        console.error("");
+        console.error("⚠️  DO NOT include http://, https://, port numbers, or trailing slashes");
+        console.error(`   ✅ Correct: ${window.location.hostname}`);
+        console.error(`   ❌ Wrong: ${window.location.origin}`);
+        console.error("========================================");
+      }
+      console.error("========================================");
+
+      // Handle Errors here.
+      const errorCode = error.code;
+
+      let userFriendlyMessage = "Google sign-in failed. Please try again.";
+      let shouldRetryWithRedirect = false;
+
+      if (errorCode === 'auth/popup-closed-by-user') {
+        userFriendlyMessage = "Sign-in cancelled. You closed the popup window.";
+      } else if (errorCode === 'auth/popup-blocked') {
+        userFriendlyMessage = "Popup was blocked. Trying redirect flow instead...";
+        shouldRetryWithRedirect = true;
+      } else if (errorCode === 'auth/cancelled-popup-request') {
+        userFriendlyMessage = "Sign-in was cancelled.";
+      } else if (errorCode === 'auth/network-request-failed') {
+        userFriendlyMessage = "Network error. Please check your internet connection.";
+      } else if (errorCode === 'auth/unauthorized-domain') {
+        userFriendlyMessage = `Domain not authorized. Please add "${window.location.hostname}" to Firebase Console → Authentication → Authorized domains.`;
+      } else if (errorCode === 'auth/internal-error') {
+        console.error("🚨 INTERNAL ERROR DETECTED!");
+        console.error("This is often caused by:");
+        console.error("  1. App Check reCAPTCHA validation failure");
+        console.error("  2. Domain not registered in reCAPTCHA admin console");
+        console.error("  3. App Check not properly configured in Firebase Console");
+        console.error("  4. OAuth client ID restrictions");
+        console.error("");
+        console.error("Check the App Check logs above for token generation failures.");
+        userFriendlyMessage = "Authentication system error. This may be caused by App Check or reCAPTCHA configuration. Please try redirect flow or contact support.";
+        shouldRetryWithRedirect = true;
+      }
+
+      // Automatically retry with redirect flow for certain errors
+      if (shouldRetryWithRedirect) {
+        console.log("🔄 Retrying with redirect flow...");
+        setError(userFriendlyMessage);
+        try {
+          await signInWithGoogleRedirect();
+          return; // Redirect initiated, don't throw error
+        } catch (redirectError) {
+          console.error("❌ Redirect flow also failed:", redirectError);
+          userFriendlyMessage = "Both popup and redirect sign-in failed. Please contact support.";
+        }
+      }
+
+      setError(userFriendlyMessage);
+      const enhancedError = new Error(userFriendlyMessage);
+      enhancedError.originalError = error;
+      throw enhancedError;
+    }
+  };
+
+  // Sign in with Google redirect (better for mobile)
+  const signInWithGoogleRedirect = async () => {
+    setError('');
+    try {
+      const provider = new GoogleAuthProvider();
+      // Add scopes if needed
+      provider.addScope('https://www.googleapis.com/auth/userinfo.email');
+      provider.addScope('https://www.googleapis.com/auth/userinfo.profile');
+      
+      // Optional: Specify additional OAuth parameters
+      provider.setCustomParameters({
+        prompt: 'select_account'
+      });
+      
+      console.log("Starting Google Sign-In with redirect");
+      return await signInWithRedirect(auth, provider);
+    } catch (error) {
+      console.error("Google Sign-In Redirect Error:", error);
+      setError("Google sign-in failed. Please try again.");
+      throw error;
+    }
+  };
+
+  // Process redirect result
+  const processRedirectResult = async () => {
+    try {
+      const result = await getRedirectResult(auth);
+      if (result) {
+        console.log("Google Sign-In Redirect Result:", result.user.email);
+      }
+      return result;
+    } catch (error) {
+      console.error("Process Redirect Error:", error);
+      setError("Failed to complete sign-in. Please try again.");
+      throw error;
+    }
+  };
+
+  // Sign out
+  const logout = async () => {
+    setError('');
+
+    // Log user logout before signing out (must be done before signOut to have auth permissions)
+    try {
+      // Log to user-level activities
+      if (currentUser) {
+        const { logActivity } = await import('../services/activity/activityService');
+        const { USER_ACTIVITIES, RESOURCE_TYPES } = await import('../constants/activityTypes');
+
+        await logActivity({
+          activity_type: USER_ACTIVITIES.LOGOUT,
+          resource_type: RESOURCE_TYPES.USER,
+          resource_id: currentUser.uid,
+          activity_details: {
+            email: currentUser.email,
+            logout_method: 'manual',
+            timestamp: new Date().toISOString()
+          }
+        }).catch(err => console.error('Failed to log user logout activity:', err));
+      }
+
+      // Log to organization-level logging (legacy system)
+      const organizationId = localStorage.getItem('currentOrganizationId');
+      if (organizationId && currentUser) {
+        await loggingClient.logEvent({
+          organization_id: organizationId,
+          event_info: {
+            event_type: 'user_logout',
+            event_category: 'user',
+            severity: 'info',
+            source_service: 'agent-studio'
+          },
+          event_data: {
+            resource_type: 'user',
+            resource_id: currentUser.uid,
+            actor_id: currentUser.uid,
+            actor_type: 'user',
+            event_payload: {
+              email: currentUser.email,
+              logout_method: 'manual'
+            }
+          }
+        });
+      }
+    } catch (logError) {
+      console.error('Failed to log user logout:', logError);
+    }
+
+    return signOut(auth);
+  };
+
+  // Reset password
+  const resetPassword = (email) => {
+    setError('');
+    return sendPasswordResetEmail(auth, email);
+  };
+
+  // ============================================================================
+  // ORGANIZATION MANAGEMENT FUNCTIONS
+  // ============================================================================
+
+  // Check if user has completed their profile setup
+  const checkProfileCompletion = async (userId) => {
+    if (!userId) return false;
+    
+    try {
+      const { db } = await import('./firebase');
+      const { doc, getDoc } = await import('firebase/firestore');
+      const { Collections } = await import('../constants/collections');
+      
+      // Use the correct collection: USER_PROFILES instead of USERS
+      const userRef = doc(db, Collections.USER_PROFILES, userId);
+      const userSnap = await getDoc(userRef);
+      
+      if (userSnap.exists()) {
+        const userData = userSnap.data();
+        // Check if user has completed basic profile information using correct nested structure
+        const hasBasicInfo = !!(userData.basic_info?.display_name && userData.basic_info.display_name.trim());
+        console.log('✅ Profile completion check:', { 
+          hasBasicInfo, 
+          collection: Collections.USER_PROFILES,
+          display_name: userData.basic_info?.display_name,
+          userData: userData 
+        });
+        return hasBasicInfo;
+      } else {
+        console.log('❌ Profile completion check: No profile document found in', Collections.USER_PROFILES);
+      }
+      
+      return false;
+    } catch (error) {
+      console.error('Error checking profile completion:', error);
+      return false;
+    }
+  };
+
+  // Check for pending invitations by user email
+  const checkPendingInvitations = useCallback(async (userEmail) => {
+    if (!userEmail) {
+      setPendingInvitations([]);
+      setPendingInvitationsCount(0);
+      return { invitations: [], count: 0 };
+    }
+
+    try {
+      console.log('🔄 Loading pending invitations for:', userEmail);
+      // const invitations = await invitationService.getPendingInvitations(userEmail); // REMOVED: invitationService deleted
+      const invitations = []; // TODO: Replace with appropriate invitation fetching if needed
+
+      setPendingInvitations(invitations);
+      setPendingInvitationsCount(invitations.length);
+
+      console.log(`✅ Loaded ${invitations.length} pending invitations`);
+      return { invitations, count: invitations.length };
+    } catch (error) {
+      console.error('❌ Error loading pending invitations:', error);
+      setPendingInvitations([]);
+      setPendingInvitationsCount(0);
+      return { invitations: [], count: 0 };
+    }
+  }, []);
+
+  // DISABLED: Load user memberships function - organizations removed
+  const loadUserMemberships = useCallback(async () => {
+    // Function disabled - organization system removed
+    return;
+  }, []);
+
+  const refreshPendingInvitations = async () => {
+    const user = auth.currentUser;
+    if (user?.email) {
+      return await checkPendingInvitations(user.email);
+    }
+    return { invitations: [], count: 0 };
+  };
+
+  // Force refresh profile completion status (useful after onboarding)
+  const refreshProfileCompletion = async () => {
+    if (!currentUser?.uid) return false;
+
+    console.log('🔄 Refreshing profile completion status...');
+    const profileCompleted = await checkProfileCompletion(currentUser.uid);
+    setHasCompletedOnboarding(profileCompleted);
+    console.log('🔄 Profile completion refreshed:', profileCompleted);
+    return profileCompleted;
+  };
+
+  // Switch project
+  const switchProject = useCallback(async (projectId) => {
+    console.log('🔄 Switching to project:', projectId);
+    setCurrentProject(projectId);
+  }, []);
+
+  // Set up real-time invitation listener
+  useEffect(() => {
+    if (currentUser?.email) {
+      console.log('🔔 Setting up real-time invitation listener for:', currentUser.email);
+
+      // Clean up any existing listener
+      if (invitationListenerRef.current) {
+        invitationListenerRef.current();
+        invitationListenerRef.current = null;
+      }
+
+      // Set up new listener
+      try {
+        // REMOVED: invitationService.subscribeToInvitations deleted
+        // const unsubscribe = invitationService.subscribeToInvitations(
+        //   currentUser.email,
+        //   (invitations) => { ... }
+        // );
+        const unsubscribe = () => {}; // TODO: Replace with appropriate invitation subscription if needed
+
+        invitationListenerRef.current = unsubscribe;
+        console.log('✅ Real-time invitation listener set up successfully');
+      } catch (error) {
+        console.error('❌ Failed to set up invitation listener:', error);
+      }
+    } else {
+      // Clean up listener if user logs out
+      if (invitationListenerRef.current) {
+        console.log('🔕 Cleaning up invitation listener');
+        invitationListenerRef.current();
+        invitationListenerRef.current = null;
+      }
+      // Reset state
+      setPendingInvitations([]);
+      setPendingInvitationsCount(0);
+      previousInvitationCountRef.current = 0;
+    }
+
+    // Cleanup on unmount
+    return () => {
+      if (invitationListenerRef.current) {
+        invitationListenerRef.current();
+      }
+    };
+  }, [currentUser?.email]);
+
+  // Set up auth state observer on mount and clean up on unmount
+  useEffect(() => {
+    console.log("Setting up auth state observer");
+    
+    // First, verify if we already have a user in local storage
+    const checkExistingUser = async () => {
+      if (auth.currentUser) {
+        console.log("Found existing user in auth state:", auth.currentUser.email);
+        try {
+          // Force token refresh to ensure we have a valid token
+          await auth.currentUser.getIdToken(true);
+          console.log("Token refreshed for existing user");
+        } catch (error) {
+          console.error("Error refreshing token for existing user:", error);
+        }
+      } else {
+        console.log("No existing user found in auth state");
+      }
+    };
+    
+    // Call the check immediately
+    checkExistingUser();
+    
+    // Then set up the auth state observer
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      console.log("Auth state changed. User:", user?.email || "No user");
+      console.log("User details:", user ? {
+        uid: user.uid,
+        email: user.email,
+        emailVerified: user.emailVerified,
+        isAnonymous: user.isAnonymous,
+        metadata: user.metadata,
+        providerData: user.providerData
+      } : "No user data");
+      
+      if (user) {
+        // When user signs in, try to verify the token with the server
+        try {
+          const token = await user.getIdToken();
+          
+          // Try to call a simple API endpoint to verify the token
+          const response = await fetch('/api/health', {
+            headers: {
+              Authorization: `Bearer ${token}`
+            }
+          });
+          
+          if (response.ok) {
+            console.log("Successfully verified token with server");
+          } else {
+            console.warn(`Token verification failed with status: ${response.status}`);
+            // Force token refresh if verification failed
+            await user.getIdToken(true);
+          }
+        } catch (error) {
+          console.error("Error verifying token with server:", error);
+        }
+
+        // Check if user has completed profile setup
+        const profileCompleted = await checkProfileCompletion(user.uid);
+        setHasCompletedOnboarding(profileCompleted);
+
+        // Load user's organization memberships
+        await loadUserMemberships(user.uid);
+      } else {
+        // User signed out - clear project data
+        setUserRole(null);
+        setCurrentProject(null);
+      }
+      
+      setCurrentUser(user);
+      setLoading(false);
+    });
+
+    // Check for redirect result on component mount
+    processRedirectResult().catch(err => {
+      console.error("Error processing redirect result:", err);
+    });
+
+    return unsubscribe;
+  }, [loadUserMemberships]);
+
+  const value = {
+    // User authentication
+    currentUser,
+    login,
+    signup,
+    signInWithGoogle,
+    signInWithGoogleRedirect,
+    processRedirectResult,
+    logout,
+    resetPassword,
+    loading,
+    error,
+
+    // User state
+    userRole,
+    hasCompletedOnboarding,
+
+    // Project management
+    currentProject,
+    switchProject,
+
+    // Profile and onboarding management
+    refreshProfileCompletion,
+
+    // Invitation management
+    pendingInvitations,
+    pendingInvitationsCount,
+    refreshPendingInvitations,
+    checkPendingInvitations,
+
+    // DISABLED: Organization functions (commented out for reference)
+    // currentOrganization: null,
+    // organizationId: null,
+    // userMemberships: [],
+    // organizationLoading: false,
+    // switchOrganization: () => console.log('disabled')
+  };
+
+  return (
+    <AuthContext.Provider value={value}>
+      {loading ? (
+        <FullScreenLoadingPage message="Authenticating" />
+      ) : (
+        children
+      )}
+    </AuthContext.Provider>
+  );
+}; 

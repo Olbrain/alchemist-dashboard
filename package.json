@@ -1,0 +1,97 @@
+{
+  "name": "@olbrain/alchemist-dashboard",
+  "version": "0.1.5",
+  "description": "Embeddable AI Agent Dashboard with Module Federation support",
+  "keywords": [
+    "react",
+    "dashboard",
+    "embed",
+    "ai",
+    "agent",
+    "module-federation",
+    "micro-frontend"
+  ],
+  "author": "OLBrain",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/olbrain/alchemist-dashboard"
+  },
+  "homepage": "https://github.com/olbrain/alchemist-dashboard#readme",
+  "private": false,
+  "main": "build/remoteEntry.js",
+  "files": [
+    "build/",
+    "README.md",
+    "WHITELABEL_CONFIG.md"
+  ],
+  "dependencies": {
+    "@emotion/react": "^11.11.0",
+    "@emotion/styled": "^11.11.0",
+    "@mui/icons-material": "^5.11.16",
+    "@mui/material": "^5.13.0",
+    "@olbrain/alchemist-dashboard": "^0.1.4",
+    "@testing-library/jest-dom": "^5.16.5",
+    "@testing-library/react": "^13.4.0",
+    "@testing-library/user-event": "^13.5.0",
+    "axios": "^1.4.0",
+    "chart.js": "^4.5.0",
+    "date-fns": "^4.1.0",
+    "firebase": "^11.10.0",
+    "react": "^18.2.0",
+    "react-chartjs-2": "^5.3.0",
+    "react-dom": "^18.2.0",
+    "react-markdown": "^8.0.7",
+    "react-router-dom": "^6.11.1",
+    "react-scripts": "^5.0.1",
+    "react-syntax-highlighter": "^5.8.0",
+    "recharts": "^3.0.2",
+    "rehype-highlight": "^7.0.0",
+    "rehype-katex": "^7.0.0",
+    "remark-breaks": "^4.0.0",
+    "remark-gfm": "^4.0.0",
+    "remark-math": "^6.0.0",
+    "uuid": "^9.0.0",
+    "web-vitals": "^2.1.4"
+  },
+  "scripts": {
+    "start": "craco start",
+    "build": "REACT_APP_ENV=production craco build",
+    "build:dev": "REACT_APP_ENV=development craco build",
+    "build:prod": "REACT_APP_ENV=production craco build",
+    "test": "craco test",
+    "test:embed": "node test-server.js",
+    "eject": "react-scripts eject",
+    "prepublishOnly": "npm run build"
+  },
+  "eslintConfig": {
+    "extends": [
+      "react-app",
+      "react-app/jest"
+    ]
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@craco/craco": "^7.1.0",
+    "buffer": "^6.0.3"
+  },
+  "peerDependencies": {
+    "@mui/material": "^5.13.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  }
+}

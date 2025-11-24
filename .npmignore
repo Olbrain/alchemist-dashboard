@@ -1,0 +1,33 @@
+# Development and test files
+test-embed.html
+test-server.js
+*.log
+
+# Source files (not needed - build/ has everything)
+src/
+public/
+
+# Environment files
+.env*
+!.env.example
+
+# Build configurations
+craco.config.js
+craco.config.embed.js
+
+# Development files
+.DS_Store
+.claude/
+*.bak
+*.OLD.*
+*.fix*
+
+# Git files
+.git/
+.gitignore
+
+# Node modules
+node_modules/
+
+# Optional: Keep examples if you want to include them
+# examples/

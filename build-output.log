@@ -1,0 +1,87 @@
+
+> project-dashboard-embed@0.1.0 build
+> REACT_APP_ENV=production craco build
+
+Creating an optimized production build...
+Compiled with warnings.
+
+[eslint] 
+src/App.js
+  Line 23:8:  'WelcomePage' is defined but never used  no-unused-vars
+
+src/components/Alchemist/TrackerPanel.js
+  Line 44:11:  'dataAccess' is assigned a value but never used                                                                               no-unused-vars
+  Line 62:6:   React Hook useCallback has an unnecessary dependency: 'extractFieldValues'. Either exclude it or remove the dependency array  react-hooks/exhaustive-deps
+
+src/components/content/DashboardContent.js
+  Line 60:10:  'PageTitle' is defined but never used                no-unused-vars
+  Line 250:9:  'formatCurrency' is assigned a value but never used  no-unused-vars
+
+src/embed/DashboardCore.js
+  Line 14:10:  'useAuth' is defined but never used      no-unused-vars
+  Line 21:8:   'Layout' is defined but never used       no-unused-vars
+  Line 27:8:   'WelcomePage' is defined but never used  no-unused-vars
+
+src/services/agents/agentService.js
+  Line 542:7:  'createAgentRestorationEvent' is assigned a value but never used  no-unused-vars
+  Line 829:7:  'createAgentSharingEvent' is assigned a value but never used      no-unused-vars
+
+src/services/conversations/conversationService.js
+  Line 22:14:  'Collections' is defined but never used  no-unused-vars
+
+src/services/tools/toolConfigurationService.js
+  Line 46:11:  'response' is assigned a value but never used  no-unused-vars
+
+src/services/users/userProfileService.js
+  Line 110:11:  'response' is assigned a value but never used  no-unused-vars
+
+Search for the keywords to learn more about each warning.
+To ignore, add // eslint-disable-next-line to the line before.
+
+File sizes after gzip:
+
+  904.25 kB (-2.09 kB)  build/static/js/main.b3f69147.js
+  673.61 kB             build/static/js/61.e5b24d14.chunk.js
+  340.45 kB             build/static/js/654.52d104bb.chunk.js
+  171.32 kB (-448 B)    build/static/js/235.f1ed2378.chunk.js
+  134.88 kB             build/static/js/626.c88024d6.chunk.js
+  125.07 kB (-603 B)    build/static/js/561.3849bf85.chunk.js
+  42.96 kB              build/static/js/950.9197807c.chunk.js
+  26.85 kB              build/static/js/245.b70fcc5c.chunk.js
+  19.96 kB (-302 B)     build/static/js/343.02cb3bd9.chunk.js
+  14.1 kB               build/static/js/344.3de73f0c.chunk.js
+  10.13 kB              build/static/css/main.7a34134b.css
+  9.9 kB                build/static/js/557.da6bd1bc.chunk.js
+  8.2 kB                build/static/js/382.bab6b991.chunk.js
+  5.62 kB               build/static/css/235.6b5e7549.chunk.css
+  5.26 kB               build/static/js/523.449fc25f.chunk.js
+  5.23 kB               build/static/js/903.4ad41b6e.chunk.js
+  5.13 kB               build/static/js/734.7eec2c18.chunk.js
+  4.54 kB               build/static/js/58.4d16d941.chunk.js
+  4.53 kB               build/remoteEntry.js
+  4.2 kB                build/static/js/803.af71c20f.chunk.js
+  2.78 kB               build/static/js/371.81ac0337.chunk.js
+  2.7 kB                build/static/js/777.78c642c9.chunk.js
+  2.66 kB               build/static/js/43.db87efbe.chunk.js
+  2.38 kB               build/static/js/608.c6703c9d.chunk.js
+  1.77 kB               build/static/js/453.ca4ae89f.chunk.js
+  1.65 kB               build/static/js/351.7c4976fd.chunk.js
+  942 B                 build/static/js/783.3b548633.chunk.js
+  546 B                 build/static/js/579.b234aac4.chunk.js
+  546 B                 build/static/js/960.9c2fabfb.chunk.js
+  300 B                 build/static/js/168.ab9829c1.chunk.js
+  300 B                 build/static/js/787.5d9a9b5c.chunk.js
+
+The bundle size is significantly larger than recommended.
+Consider reducing it with code splitting: https://goo.gl/9VhYWB
+You can also analyze the project dependencies: https://goo.gl/LeUzfb
+
+The project was built assuming it is hosted at auto.
+You can control this with the homepage field in your package.json.
+
+The build folder is ready to be deployed.
+
+Find out more about deployment here:
+
+  https://cra.link/deployment
+

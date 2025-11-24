@@ -1,0 +1,85 @@
+/**
+ * Simple Storage Service
+ * 
+ * Reads storage information directly from Firestore user_storage collection
+ * No business logic - just data fetching for display
+ */
+
+import { db } from '../../utils/firebase';
+// import { doc, getDoc } from 'firebase/firestore'; // REMOVED: Firebase/Firestore
+
+/**
+ * Get storage information for a user from user_storage collection
+ * @param {string} userId - User ID
+ * @returns {Promise<Object>} Storage information
+ */
+export const getStorageInfo = async (userId) => {
+  try {
+    if (!userId) {
+      throw new Error('User ID is required');
+    }
+
+    const userStorageRef = doc(db, 'user_storage', userId);
+    const userStorageDoc = await getDoc(userStorageRef);
+    
+    if (!userStorageDoc.exists()) {
+      // Return default values if no storage document exists
+      return {
+        storage_quota_mb: 0,
+        used_storage_mb: 0,
+        file_count: 0,
+        subscription_tier: 'free',
+        created_at: null,
+        updated_at: null
+      };
+    }
+    
+    return userStorageDoc.data();
+  } catch (error) {
+    console.error('Error fetching storage info:', error);
+    throw error;
+  }
+};
+
+/**
+ * Calculate storage usage percentage
+ * @param {number} usedMB - Used storage in MB
+ * @param {number} quotaMB - Storage quota in MB
+ * @returns {number} Usage percentage (0-100)
+ */
+export const calculateStoragePercentage = (usedMB, quotaMB) => {
+  if (!quotaMB || quotaMB === 0) return 0;
+  return Math.min(100, Math.round((usedMB / quotaMB) * 100));
+};
+
+/**
+ * Calculate remaining storage
+ * @param {number} usedMB - Used storage in MB
+ * @param {number} quotaMB - Storage quota in MB
+ * @returns {number} Remaining storage in MB
+ */
+export const calculateRemainingStorage = (usedMB, quotaMB) => {
+  return Math.max(0, quotaMB - usedMB);
+};
+
+/**
+ * Check if storage usage is in warning range (>80%)
+ * @param {number} usedMB - Used storage in MB
+ * @param {number} quotaMB - Storage quota in MB
+ * @returns {boolean} True if in warning range
+ */
+export const isStorageInWarning = (usedMB, quotaMB) => {
+  return calculateStoragePercentage(usedMB, quotaMB) > 80;
+};
+
+/**
+ * Format storage size for display
+ * @param {number} sizeInMB - Size in MB
+ * @returns {string} Formatted size string
+ */
+export const formatStorageSize = (sizeInMB) => {
+  if (sizeInMB >= 1024) {
+    return `${(sizeInMB / 1024).toFixed(1)} GB`;
+  }
+  return `${Math.round(sizeInMB)} MB`;
+};

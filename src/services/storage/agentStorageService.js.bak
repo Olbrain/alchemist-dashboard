@@ -1,0 +1,390 @@
+/**
+ * Agent Storage Service
+ *
+ * Tracks and manages storage usage for individual agents by querying
+ * the existing agent_storage/{agent_id}/attachments/ Firestore collection
+ */
+
+import { db } from '../../utils/firebase';
+// import { collection, doc, getDoc, getDocs, query, where, orderBy, limit, onSnapshot } from 'firebase/firestore'; // REMOVED: Firebase/Firestore
+
+/**
+ * Get storage usage statistics for an agent
+ * @param {string} agentId - Agent ID
+ * @returns {Promise<Object>} Storage usage statistics
+ */
+export const getAgentStorageUsage = async (agentId) => {
+  try {
+    if (!agentId) {
+      throw new Error('Agent ID is required');
+    }
+
+    // First, try to get the aggregated metadata document
+    const metadataRef = doc(db, 'agent_storage', agentId);
+    const metadataDoc = await getDoc(metadataRef);
+
+    let totalBytes = 0;
+    let fileCount = 0;
+    let lastUpload = null;
+    let storageLimit = 1024 * 1024 * 1024; // Default 1GB in bytes (only used if metadata doesn't exist)
+
+    // If metadata exists, use it for efficient retrieval
+    if (metadataDoc.exists()) {
+      const metadata = metadataDoc.data();
+      totalBytes = metadata.storage_used || 0;
+      fileCount = metadata.total_files || 0;
+      lastUpload = metadata.last_upload || null;
+      // Use storage_limit from metadata, this is the authoritative source
+      storageLimit = metadata.storage_limit || (1024 * 1024 * 1024);
+    }
+
+    // Get breakdown by file type (need to query attachments for this)
+    // Only get active attachments (exclude soft-deleted)
+    const attachmentsRef = collection(db, 'agent_storage', agentId, 'attachments');
+    const activeQuery = query(attachmentsRef, where('status', '==', 'active'));
+    const snapshot = await getDocs(activeQuery);
+
+    const breakdown = {
+      images: { count: 0, size_bytes: 0 },
+      documents: { count: 0, size_bytes: 0 },
+      others: { count: 0, size_bytes: 0 }
+    };
+
+    // If metadata didn't exist, calculate from attachments
+    if (!metadataDoc.exists()) {
+      totalBytes = 0;
+      fileCount = snapshot.size;
+      let mostRecentTimestamp = null;
+
+      snapshot.docs.forEach(doc => {
+        const data = doc.data();
+        const size = data.size || 0;
+        totalBytes += size;
+
+        // Track most recent upload
+        if (data.uploaded_at) {
+          const currentTime = data.uploaded_at.seconds || data.uploaded_at._seconds || new Date(data.uploaded_at).getTime() / 1000;
+          const recentTime = mostRecentTimestamp ?
+            (mostRecentTimestamp.seconds || mostRecentTimestamp._seconds || new Date(mostRecentTimestamp).getTime() / 1000) : 0;
+
+          if (!mostRecentTimestamp || currentTime > recentTime) {
+            mostRecentTimestamp = data.uploaded_at;
+          }
+        }
+      });
+
+      lastUpload = mostRecentTimestamp;
+    }
+
+    // Calculate breakdown by type
+    snapshot.docs.forEach(doc => {
+      const data = doc.data();
+      const size = data.size || 0;
+      const filename = data.name || '';
+      const contentType = data.type || '';
+
+      // Categorize by file type
+      if (isImageFile(filename, contentType)) {
+        breakdown.images.count += 1;
+        breakdown.images.size_bytes += size;
+      } else if (isDocumentFile(filename, contentType)) {
+        breakdown.documents.count += 1;
+        breakdown.documents.size_bytes += size;
+      } else {
+        breakdown.others.count += 1;
+        breakdown.others.size_bytes += size;
+      }
+    });
+
+    // Convert to MB
+    const breakdownMB = {
+      images: {
+        count: breakdown.images.count,
+        size_mb: bytesToMB(breakdown.images.size_bytes)
+      },
+      documents: {
+        count: breakdown.documents.count,
+        size_mb: bytesToMB(breakdown.documents.size_bytes)
+      },
+      others: {
+        count: breakdown.others.count,
+        size_mb: bytesToMB(breakdown.others.size_bytes)
+      }
+    };
+
+    const totalMB = bytesToMB(totalBytes);
+    const storageLimitMB = bytesToMB(storageLimit);
+
+    return {
+      usage: {
+        total_bytes: totalBytes,
+        total_mb: totalMB,
+        file_count: fileCount,
+        last_updated: new Date().toISOString(),
+        last_upload: lastUpload
+      },
+      quota: {
+        total_mb: storageLimitMB,
+        total_bytes: storageLimit,
+        tier: 'standard'
+      },
+      breakdown: breakdownMB,
+      usage_percentage: Math.min(100, parseFloat(((totalMB / storageLimitMB) * 100).toFixed(1)))
+    };
+  } catch (error) {
+    console.error('Error getting agent storage usage:', error);
+    throw error;
+  }
+};
+
+/**
+ * Get list of attachments for an agent
+ * @param {string} agentId - Agent ID
+ * @param {number} limitCount - Limit number of results (default 20)
+ * @returns {Promise<Array>} Array of attachment metadata
+ */
+export const getAttachmentsList = async (agentId, limitCount = 20) => {
+  try {
+    if (!agentId) {
+      throw new Error('Agent ID is required');
+    }
+
+    const attachmentsRef = collection(db, 'agent_storage', agentId, 'attachments');
+    // Try to order by uploaded_at field and filter by active status
+    let snapshot;
+    try {
+      const q = query(
+        attachmentsRef,
+        where('status', '==', 'active'),
+        orderBy('uploaded_at', 'desc'),
+        limit(limitCount)
+      );
+      snapshot = await getDocs(q);
+    } catch (orderError) {
+      // If orderBy fails, get without ordering but still filter by status
+      console.log('OrderBy failed, fetching without ordering:', orderError);
+      const fallbackQuery = query(
+        attachmentsRef,
+        where('status', '==', 'active'),
+        limit(limitCount)
+      );
+      snapshot = await getDocs(fallbackQuery);
+    }
+
+    const attachments = snapshot.docs.map(doc => {
+      const data = doc.data();
+      return {
+        id: doc.id,
+        attachment_id: doc.id,
+        name: data.name || 'Unknown',
+        type: data.type || '',
+        size: data.size || 0,
+        size_mb: bytesToMB(data.size || 0),
+        source: data.source || 'unknown',
+        storage_url: data.storage_url || '',
+        uploaded_by: data.uploaded_by || '',
+        uploaded_at: data.uploaded_at,
+        processed: data.processed || false,
+        processing_results: data.processing_results || null,
+        knowledge_id: data.knowledge_id || null,
+        usage_count: data.usage_count || 0,
+        last_accessed: data.last_accessed || null
+      };
+    });
+
+    // If we couldn't order by uploaded_at in the query, sort manually
+    if (!attachments[0]?.uploaded_at) {
+      return attachments;
+    }
+
+    // Ensure proper ordering
+    attachments.sort((a, b) => {
+      const timeA = a.uploaded_at ?
+        (a.uploaded_at.seconds || a.uploaded_at._seconds || new Date(a.uploaded_at).getTime() / 1000) : 0;
+      const timeB = b.uploaded_at ?
+        (b.uploaded_at.seconds || b.uploaded_at._seconds || new Date(b.uploaded_at).getTime() / 1000) : 0;
+      return timeB - timeA; // Descending order
+    });
+
+    return attachments;
+  } catch (error) {
+    console.error('Error getting attachments list:', error);
+    throw error;
+  }
+};
+
+/**
+ * Get storage statistics summary
+ * @param {string} agentId - Agent ID
+ * @returns {Promise<Object>} Storage statistics
+ */
+export const getStorageStats = async (agentId) => {
+  try {
+    const [usage, recentFiles] = await Promise.all([
+      getAgentStorageUsage(agentId),
+      getAttachmentsList(agentId, 10)
+    ]);
+
+    const averageFileSize = usage.usage.file_count > 0
+      ? usage.usage.total_mb / usage.usage.file_count
+      : 0;
+
+    // Use uploaded_at from recent files or from usage stats
+    const lastUpload = recentFiles.length > 0 && recentFiles[0].uploaded_at
+      ? recentFiles[0].uploaded_at
+      : usage.usage.last_upload || null;
+
+    return {
+      ...usage,
+      statistics: {
+        average_file_size_mb: Math.round(averageFileSize * 100) / 100,
+        last_upload: lastUpload,
+        storage_path: `/agent_storage/${agentId}/attachments/`
+      },
+      recent_attachments: recentFiles.slice(0, 5) // Show only last 5
+    };
+  } catch (error) {
+    console.error('Error getting storage stats:', error);
+    throw error;
+  }
+};
+
+/**
+ * Listen to real-time storage changes
+ * @param {string} agentId - Agent ID
+ * @param {Function} callback - Callback function to handle updates
+ * @returns {Function} Unsubscribe function
+ */
+export const listenToStorageChanges = (agentId, callback) => {
+  try {
+    if (!agentId) {
+      throw new Error('Agent ID is required');
+    }
+
+    // Listen to the metadata document for more efficient updates
+    const metadataRef = doc(db, 'agent_storage', agentId);
+
+    return onSnapshot(metadataRef,
+      async (docSnapshot) => {
+        try {
+          // When metadata changes, get the full storage stats
+          const stats = await getStorageStats(agentId);
+          callback(stats);
+        } catch (error) {
+          console.error('Error in storage listener:', error);
+        }
+      },
+      (error) => {
+        console.error('Error listening to storage changes:', error);
+        // Fallback: listen to attachments collection if metadata document doesn't exist
+        const attachmentsRef = collection(db, 'agent_storage', agentId, 'attachments');
+        return onSnapshot(attachmentsRef,
+          async () => {
+            try {
+              const stats = await getStorageStats(agentId);
+              callback(stats);
+            } catch (error) {
+              console.error('Error in fallback storage listener:', error);
+            }
+          }
+        );
+      }
+    );
+  } catch (error) {
+    console.error('Error setting up storage listener:', error);
+    return () => {}; // Return empty unsubscribe function
+  }
+};
+
+/**
+ * Check if storage is in warning range (>80% used)
+ * @param {Object} storageStats - Storage statistics object
+ * @returns {boolean} True if in warning range
+ */
+export const isStorageInWarning = (storageStats) => {
+  return storageStats?.usage_percentage > 80;
+};
+
+/**
+ * Check if storage is nearly full (>90% used)
+ * @param {Object} storageStats - Storage statistics object
+ * @returns {boolean} True if nearly full
+ */
+export const isStorageNearlyFull = (storageStats) => {
+  return storageStats?.usage_percentage > 90;
+};
+
+/**
+ * Format storage size for display
+ * @param {number} sizeInMB - Size in MB
+ * @returns {string} Formatted size string
+ */
+export const formatStorageSize = (sizeInMB) => {
+  if (sizeInMB >= 1024) {
+    return `${(sizeInMB / 1024).toFixed(1)} GB`;
+  } else if (sizeInMB >= 1) {
+    return `${Math.round(sizeInMB * 10) / 10} MB`;
+  } else {
+    return `${Math.round(sizeInMB * 1024)} KB`;
+  }
+};
+
+/**
+ * Calculate remaining storage
+ * @param {Object} storageStats - Storage statistics object
+ * @returns {number} Remaining storage in MB
+ */
+export const calculateRemainingStorage = (storageStats) => {
+  if (!storageStats?.quota || !storageStats?.usage) {
+    return 0;
+  }
+
+  // Use MB values if available
+  if (storageStats.quota.total_mb !== undefined && storageStats.usage.total_mb !== undefined) {
+    return Math.max(0, storageStats.quota.total_mb - storageStats.usage.total_mb);
+  }
+
+  // Fall back to calculating from bytes
+  if (storageStats.quota.total_bytes !== undefined && storageStats.usage.total_bytes !== undefined) {
+    const quotaMB = bytesToMB(storageStats.quota.total_bytes);
+    const usedMB = bytesToMB(storageStats.usage.total_bytes);
+    return Math.max(0, quotaMB - usedMB);
+  }
+
+  return 0;
+};
+
+// Helper functions
+const bytesToMB = (bytes) => {
+  return bytes / (1024 * 1024);
+};
+
+const isImageFile = (filename, contentType) => {
+  const imageExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'];
+  const imageContentTypes = ['image/'];
+
+  const hasImageExtension = imageExtensions.some(ext =>
+    filename.toLowerCase().endsWith(ext)
+  );
+
+  const hasImageContentType = imageContentTypes.some(type =>
+    contentType.toLowerCase().startsWith(type)
+  );
+
+  return hasImageExtension || hasImageContentType;
+};
+
+const isDocumentFile = (filename, contentType) => {
+  const docExtensions = ['.pdf', '.doc', '.docx', '.txt', '.md', '.json', '.yaml', '.yml'];
+  const docContentTypes = ['application/pdf', 'application/msword', 'text/', 'application/json'];
+
+  const hasDocExtension = docExtensions.some(ext =>
+    filename.toLowerCase().endsWith(ext)
+  );
+
+  const hasDocContentType = docContentTypes.some(type =>
+    contentType.toLowerCase().startsWith(type)
+  );
+
+  return hasDocExtension || hasDocContentType;
+};

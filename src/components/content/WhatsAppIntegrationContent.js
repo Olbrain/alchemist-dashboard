@@ -1,0 +1,1625 @@
+/**
+ * WhatsApp Integration Content Component
+ *
+ * Dedicated page for WhatsApp integration management in Integration section
+ *
+ * Features:
+ * - Tab 1: Setup - Phone registration, verification, webhook, business profile
+ * - Tab 2: Templates - Template management
+ * - Tab 3: Contacts - Contact management
+ */
+import React, { useState, useEffect } from 'react';
+import {
+  Box,
+  Typography,
+  Tabs,
+  Tab,
+  Card,
+  CardContent,
+  TextField,
+  Button,
+  CircularProgress,
+  Alert,
+  Grid,
+  Chip,
+  Select,
+  MenuItem,
+  FormControl,
+  InputLabel,
+  Tooltip,
+  IconButton,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  Paper,
+  Accordion,
+  AccordionSummary,
+  AccordionDetails,
+  FormControlLabel,
+  Divider,
+  RadioGroup,
+  Radio,
+  Menu,
+  ListItemIcon,
+  ListItemText
+} from '@mui/material';
+import {
+  WhatsApp as WhatsAppIcon,
+  CheckCircle as CheckCircleIcon,
+  Phone as PhoneIcon,
+  Business as BusinessIcon,
+  Refresh as RefreshIcon,
+  Add as AddIcon,
+  Edit as EditIcon,
+  Delete as DeleteIcon,
+  Send as SubmitIcon,
+  ExpandMore as ExpandMoreIcon,
+  Close as CloseIcon,
+  Search as SearchIcon,
+  MoreVert as MoreVertIcon
+} from '@mui/icons-material';
+import { CardTitle, HelperText } from '../../utils/typography';
+
+// Import services
+import whatsAppService from '../../services/whatsapp/whatsappService';
+import apiKeyService from '../../services/apiKeys/apiKeyService';
+import { useAuth } from '../../utils/AuthContext';
+import NotificationSystem, { createNotification } from '../shared/NotificationSystem';
+import EmptyState from '../shared/EmptyState';
+import { db } from '../../utils/firebase';
+// import { collection, query, getDocs, orderBy } from 'firebase/firestore'; // REMOVED: Firebase/Firestore
+import ContactsTab from '../whatsapp/ContactsTab';
+import { getProjectOrganizationId } from '../../utils/projectHelpers';
+
+// Import assets
+import whatsappLogo from '../../assets/img/integrations/whatsapp-logo.svg';
+
+// FIRESTORE STUBS - These functions are stubbed because Firestore is disabled
+const collection = (...args) => { console.warn('Firestore disabled: collection() called'); return null; };
+const query = (...args) => { console.warn('Firestore disabled: query() called'); return null; };
+const getDocs = async (...args) => { console.warn('Firestore disabled: getDocs() called'); return { docs: [], size: 0, forEach: () => {} }; };
+const orderBy = (...args) => { console.warn('Firestore disabled: orderBy() called'); return null; };
+
+
+const WhatsAppIntegrationContent = ({ agentId }) => {
+  const { currentUser, currentProject } = useAuth();
+  const [organizationId, setOrganizationId] = useState(null);
+  const [activeTab, setActiveTab] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [notification, setNotification] = useState(null);
+
+  // Account state
+  const [account, setAccount] = useState(null);
+  const [accountHealth, setAccountHealth] = useState(null);
+
+  // WhatsApp API Key check state
+  const [apiKeyCheckStatus, setApiKeyCheckStatus] = useState(null); // null, 'checking', 'exists', 'missing'
+  const [apiKeyDetails, setApiKeyDetails] = useState(null);
+
+  // Setup state
+  const [phoneNumber, setPhoneNumber] = useState('');
+  const [businessName, setBusinessName] = useState('');
+  const [verificationCode, setVerificationCode] = useState('');
+  const [verificationMethod, setVerificationMethod] = useState('sms');
+  const [codeRequested, setCodeRequested] = useState(false);
+  const [setupLoading, setSetupLoading] = useState(false);
+  const [senderExistsDialog, setSenderExistsDialog] = useState(false);
+  const [existingSenderInfo, setExistingSenderInfo] = useState(null);
+  const [updateBusinessName, setUpdateBusinessName] = useState('');
+
+  // Template management state
+  const [templates, setTemplates] = useState([]);
+  const [selectedTemplate, setSelectedTemplate] = useState(null);
+  const [templateDialogOpen, setTemplateDialogOpen] = useState(false);
+  const [templateMode, setTemplateMode] = useState('create'); // 'create' or 'edit'
+  const [templateForm, setTemplateForm] = useState({
+    name: '',
+    category: 'utility',
+    language: 'en',
+    header: {
+      type: 'IMAGE',
+      image_url: ''
+    },
+    body: '',
+    footer: ''
+  });
+  const [templateLoading, setTemplateLoading] = useState(false);
+  const [templatesLoading, setTemplatesLoading] = useState(false);
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [formErrors, setFormErrors] = useState({});
+  const [previewTemplate, setPreviewTemplate] = useState(null);
+  const [previewDialogOpen, setPreviewDialogOpen] = useState(false);
+  const [menuAnchorEl, setMenuAnchorEl] = useState(null);
+  const [selectedTemplateForMenu, setSelectedTemplateForMenu] = useState(null);
+
+  // Fetch organization_id from current project
+  useEffect(() => {
+    const fetchOrgId = async () => {
+      if (currentProject) {
+        const orgId = await getProjectOrganizationId(currentProject);
+        setOrganizationId(orgId);
+      }
+    };
+    fetchOrgId();
+  }, [currentProject]);
+
+  // Load initial data
+  useEffect(() => {
+    if (agentId) {
+      loadAccount();
+      loadTemplates();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentId]);
+
+  const loadAccount = async () => {
+    try {
+      setLoading(true);
+      const result = await whatsAppService.getAccount(agentId);
+
+      if (result && result.id) {
+        setAccount(result);
+        setPhoneNumber(result.phone_number || '');
+        setBusinessName(result.business_name || '');
+        // Webhook URL is auto-registered on verification, no need to populate state
+        // Only load health if account is active or verified
+        if (result.status === 'active' || result.verified) {
+          loadAccountHealth();
+        }
+      }
+    } catch (error) {
+      console.error('Error loading account:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadAccountHealth = async () => {
+    try {
+      const health = await whatsAppService.getAccountHealth(agentId);
+      setAccountHealth(health);
+    } catch (error) {
+      console.error('Error loading account health:', error);
+    }
+  };
+
+  /**
+   * Auto-create WhatsApp API key for webhook authentication (internal use only)
+   */
+  const createWhatsAppApiKeyIfNeeded = async () => {
+    try {
+      console.log('Auto-creating WhatsApp API key for webhook authentication...');
+      const result = await apiKeyService.createWhatsAppApiKey(
+        agentId,
+        currentUser.uid,
+        organizationId
+      );
+
+      if (result.success) {
+        console.log('✅ WhatsApp API key created successfully:', result.keyId);
+      } else {
+        console.warn('Failed to create WhatsApp API key:', result.error);
+      }
+    } catch (error) {
+      console.error('Error auto-creating WhatsApp API key:', error);
+      // Don't show error to user since this is internal - just log it
+    }
+  };
+
+  /**
+   * Check if WhatsApp API key exists (for debugging/verification)
+   */
+  const handleCheckWhatsAppApiKey = async () => {
+    try {
+      setApiKeyCheckStatus('checking');
+      const result = await apiKeyService.getWhatsAppIntegration(agentId);
+
+      if (result.success && result.key) {
+        setApiKeyCheckStatus('exists');
+        setApiKeyDetails(result.key);
+        setNotification(createNotification('success', '✅ WhatsApp API key exists and is active'));
+      } else {
+        setApiKeyCheckStatus('missing');
+        setApiKeyDetails(null);
+        setNotification(createNotification('warning', '❌ WhatsApp API key not found'));
+      }
+    } catch (error) {
+      console.error('Error checking WhatsApp API key:', error);
+      setApiKeyCheckStatus('missing');
+      setApiKeyDetails(null);
+      setNotification(createNotification('error', 'Failed to check API key status'));
+    }
+  };
+
+  /**
+   * Manually create WhatsApp API key (fallback if auto-creation failed)
+   */
+  const handleManualCreateApiKey = async () => {
+    try {
+      setApiKeyCheckStatus('checking');
+      const result = await apiKeyService.createWhatsAppApiKey(
+        agentId,
+        currentUser.uid,
+        organizationId
+      );
+
+      if (result.success) {
+        setApiKeyCheckStatus('exists');
+        setApiKeyDetails({ id: result.keyId, key_prefix: result.apiKey.substring(0, 12) });
+        setNotification(createNotification('success', '✅ WhatsApp API key created successfully'));
+      } else {
+        setApiKeyCheckStatus('missing');
+        setNotification(createNotification('error', result.error || 'Failed to create API key'));
+      }
+    } catch (error) {
+      console.error('Error creating WhatsApp API key:', error);
+      setApiKeyCheckStatus('missing');
+      setNotification(createNotification('error', 'Failed to create API key'));
+    }
+  };
+
+  const handleCreateAccount = async () => {
+    try {
+      setSetupLoading(true);
+
+      const result = await whatsAppService.createAccount(
+        agentId,
+        phoneNumber,
+        businessName
+      );
+
+      if (result.success) {
+        setNotification(createNotification('success', 'Account created successfully. Please verify your phone number.'));
+        await loadAccount();
+      } else {
+        setNotification(createNotification('error', result.message || 'Failed to create account'));
+      }
+    } catch (error) {
+      console.error('Error creating account:', error);
+      setNotification(createNotification('error', error.message || 'Failed to create account'));
+    } finally {
+      setSetupLoading(false);
+    }
+  };
+
+  const handleRequestVerificationCode = async () => {
+    try {
+      setSetupLoading(true);
+
+      const result = await whatsAppService.requestVerificationCode(
+        agentId,
+        verificationMethod
+      );
+
+      if (result.success) {
+        setCodeRequested(true);
+        setNotification(createNotification('success', `Verification code sent via ${verificationMethod.toUpperCase()}. Please check your ${verificationMethod === 'sms' ? 'messages' : 'phone'}.`));
+      } else {
+        setNotification(createNotification('error', result.message || 'Failed to send verification code'));
+      }
+    } catch (error) {
+      console.error('Error requesting verification code:', error);
+      setNotification(createNotification('error', error.message || 'Failed to send verification code'));
+    } finally {
+      setSetupLoading(false);
+    }
+  };
+
+  const handleVerifyPhone = async () => {
+    try {
+      setSetupLoading(true);
+
+      const result = await whatsAppService.verifyPhoneNumber(
+        agentId,
+        verificationCode
+      );
+
+      if (result.verified || result.success) {
+        // Reload account to check if sender already exists
+        const updatedAccount = await whatsAppService.getAccount(agentId);
+
+        if (updatedAccount?.whatsapp_sender_exists) {
+          // Sender already exists - show dialog for user choice
+          setExistingSenderInfo(updatedAccount.existing_sender_profile);
+          setUpdateBusinessName(businessName); // Pre-fill with current business name
+          setSenderExistsDialog(true);
+          setCodeRequested(false);
+          setVerificationCode('');
+        } else {
+          // Normal success - sender registered
+          setNotification(createNotification('success', 'Phone number verified and sender registered successfully!'));
+          setCodeRequested(false);
+          setVerificationCode('');
+          await loadAccount();
+
+          // Auto-create WhatsApp API key for webhook authentication (internal use)
+          await createWhatsAppApiKeyIfNeeded();
+        }
+      } else {
+        setNotification(createNotification('error', result.message || 'Verification failed'));
+      }
+    } catch (error) {
+      console.error('Error verifying phone:', error);
+      setNotification(createNotification('error', error.message || 'Verification failed'));
+    } finally {
+      setSetupLoading(false);
+    }
+  };
+
+  const handleUseExistingSender = async () => {
+    try {
+      setSetupLoading(true);
+      await whatsAppService.useExistingSender(agentId);
+      setSenderExistsDialog(false);
+      setNotification(createNotification('success', 'Using existing WhatsApp sender. Phone verified successfully!'));
+      await loadAccount();
+
+      // Auto-create WhatsApp API key for webhook authentication (internal use)
+      await createWhatsAppApiKeyIfNeeded();
+    } catch (error) {
+      console.error('Error using existing sender:', error);
+      setNotification(createNotification('error', error.message || 'Failed to use existing sender'));
+    } finally {
+      setSetupLoading(false);
+    }
+  };
+
+  const handleUpdateSenderProfile = async () => {
+    try {
+      setSetupLoading(true);
+      await whatsAppService.updateSenderProfile(agentId, updateBusinessName);
+      setSenderExistsDialog(false);
+      setNotification(createNotification('success', 'Sender profile updated successfully!'));
+      await loadAccount();
+
+      // Auto-create WhatsApp API key for webhook authentication (internal use)
+      await createWhatsAppApiKeyIfNeeded();
+    } catch (error) {
+      console.error('Error updating sender profile:', error);
+      setNotification(createNotification('error', error.message || 'Failed to update sender profile'));
+    } finally {
+      setSetupLoading(false);
+    }
+  };
+
+  // ===========================================================================
+  // TEMPLATE MANAGEMENT FUNCTIONS
+  // ===========================================================================
+
+  const loadTemplates = async () => {
+    try {
+      setTemplatesLoading(true);
+
+      // Fetch templates directly from Firestore subcollection
+      const templatesQuery = query(
+        collection(db, 'whatsapp_templates', agentId, 'templates'),
+        orderBy('created_at', 'desc')
+      );
+
+      const querySnapshot = await getDocs(templatesQuery);
+      const fetchedTemplates = querySnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+
+      setTemplates(fetchedTemplates);
+    } catch (error) {
+      console.error('Error loading templates:', error);
+      setNotification(createNotification('error', 'Failed to load templates'));
+    } finally {
+      setTemplatesLoading(false);
+    }
+  };
+
+  const handleCreateTemplate = () => {
+    setTemplateMode('create');
+    setTemplateForm({
+      name: '',
+      category: 'utility',
+      language: 'en',
+      header: {
+        type: 'IMAGE',
+        image_url: ''
+      },
+      body: '',
+      footer: ''
+    });
+    setFormErrors({});
+    setTemplateDialogOpen(true);
+  };
+
+  const handleEditTemplate = (template) => {
+    setTemplateMode('edit');
+    setSelectedTemplate(template);
+    setTemplateForm({
+      name: template.name,
+      category: template.category,
+      language: template.language,
+      header: template.header || { type: 'IMAGE', image_url: '' },
+      body: template.body,
+      footer: template.footer || ''
+    });
+    setFormErrors({});
+    setTemplateDialogOpen(true);
+  };
+
+  const validateTemplateForm = () => {
+    const errors = {};
+
+    // Name validation
+    if (!templateForm.name) {
+      errors.name = 'Template name is required';
+    } else if (!/^[a-z0-9_]+$/.test(templateForm.name)) {
+      errors.name = 'Template name must contain only lowercase letters, numbers, and underscores';
+    }
+
+    // Header image validation
+    if (templateForm.header?.image_url) {
+      const imageUrl = templateForm.header.image_url.trim();
+      if (imageUrl && !imageUrl.startsWith('http://') && !imageUrl.startsWith('https://')) {
+        errors.header = 'Header image URL must be a valid HTTP or HTTPS URL';
+      }
+    }
+
+    // Body validation
+    if (!templateForm.body) {
+      errors.body = 'Template body is required';
+    } else if (templateForm.body.length > 1024) {
+      errors.body = 'Template body must be 1024 characters or less';
+    }
+
+    // Footer validation
+    if (templateForm.footer && templateForm.footer.length > 60) {
+      errors.footer = 'Footer must be 60 characters or less';
+    }
+
+    setFormErrors(errors);
+    return Object.keys(errors).length === 0;
+  };
+
+  const handleSaveTemplate = async () => {
+    if (!validateTemplateForm()) {
+      return;
+    }
+
+    try {
+      setTemplateLoading(true);
+
+      const templateData = {
+        agent_id: agentId,
+        name: templateForm.name,
+        category: templateForm.category,
+        language: templateForm.language,
+        body: templateForm.body,
+        ...(templateForm.header?.image_url && { header: templateForm.header }),
+        ...(templateForm.footer && { footer: templateForm.footer })
+      };
+
+      if (templateMode === 'create') {
+        await whatsAppService.createTemplate(templateData);
+        setNotification(createNotification('success', 'Template created successfully'));
+      } else {
+        await whatsAppService.updateTemplate(
+          agentId,
+          selectedTemplate.id,
+          templateData
+        );
+        setNotification(createNotification('success', 'Template updated successfully'));
+      }
+
+      setTemplateDialogOpen(false);
+      setTemplateLoading(false);
+
+      // Reload templates to show updated list
+      await loadTemplates();
+    } catch (error) {
+      console.error('Error saving template:', error);
+      setNotification(createNotification('error', error.message || 'Failed to save template'));
+      setTemplateLoading(false);
+    }
+  };
+
+  const handleDeleteTemplate = async (templateId) => {
+    if (!window.confirm('Are you sure you want to delete this template? This action cannot be undone.')) {
+      return;
+    }
+
+    try {
+      setTemplateLoading(true);
+      await whatsAppService.deleteTemplate(agentId, templateId);
+      setNotification(createNotification('success', 'Template deleted successfully'));
+      setTemplateLoading(false);
+
+      // Reload templates immediately after delete
+      await loadTemplates();
+    } catch (error) {
+      console.error('Error deleting template:', error);
+      setNotification(createNotification('error', error.message || 'Failed to delete template'));
+      setTemplateLoading(false);
+    }
+  };
+
+  const handleSubmitForApproval = async (template) => {
+    const isResubmit = template.status === 'approved' || template.status === 'rejected';
+    const confirmMessage = isResubmit
+      ? `Resubmit template "${template.name}" for WhatsApp approval? This will create a new version.`
+      : `Submit template "${template.name}" for WhatsApp approval?`;
+
+    if (!window.confirm(confirmMessage)) {
+      return;
+    }
+
+    try {
+      setTemplateLoading(true);
+      await whatsAppService.submitTemplateForApproval(
+        template.id,
+        agentId
+      );
+
+      const successMessage = isResubmit
+        ? 'Template resubmitted for approval. This may take 5 minutes to 24 hours.'
+        : 'Template submitted for approval. This may take 5 minutes to 24 hours.';
+
+      setNotification(createNotification('success', successMessage));
+      setTemplateLoading(false);
+
+      // Reload templates to show updated status
+      await loadTemplates();
+    } catch (error) {
+      console.error('Error submitting template:', error);
+      setNotification(createNotification('error', error.message || 'Failed to submit template'));
+      setTemplateLoading(false);
+    }
+  };
+
+  const handleRefreshStatus = async (template) => {
+    try {
+      setTemplateLoading(true);
+      await whatsAppService.refreshTemplateStatus(agentId, template.id);
+      setNotification(createNotification('success', 'Template status refreshed'));
+      await loadTemplates();
+    } catch (error) {
+      console.error('Error refreshing status:', error);
+      setNotification(createNotification('error', error.message || 'Failed to refresh status'));
+    } finally {
+      setTemplateLoading(false);
+    }
+  };
+
+
+  const filterTemplates = () => {
+    return templates.filter(template => {
+      // Status filter
+      if (statusFilter !== 'all' && template.status !== statusFilter) {
+        return false;
+      }
+
+      // Search filter
+      if (searchQuery && !template.name.toLowerCase().includes(searchQuery.toLowerCase())) {
+        return false;
+      }
+
+      return true;
+    });
+  };
+
+  const getStatusColor = (status) => {
+    switch (status) {
+      case 'draft': return 'default';
+      case 'submitted':
+      case 'pending': return 'info';
+      case 'approved': return 'success';
+      case 'rejected': return 'error';
+      default: return 'default';
+    }
+  };
+
+  const getStatusDotColor = (status) => {
+    switch (status) {
+      case 'draft': return '#9e9e9e'; // Gray
+      case 'submitted': return '#2196f3'; // Blue
+      case 'pending': return '#2196f3'; // Blue
+      case 'approved': return '#4caf50'; // Green
+      case 'rejected': return '#f44336'; // Red
+      default: return '#9e9e9e';
+    }
+  };
+
+  const handlePreviewTemplate = (template) => {
+    setPreviewTemplate(template);
+    setPreviewDialogOpen(true);
+  };
+
+  const handleOpenMenu = (event, template) => {
+    event.stopPropagation(); // Prevent row click
+    setMenuAnchorEl(event.currentTarget);
+    setSelectedTemplateForMenu(template);
+  };
+
+  const handleCloseMenu = () => {
+    setMenuAnchorEl(null);
+    setSelectedTemplateForMenu(null);
+  };
+
+  const handleMenuAction = (action, template) => {
+    handleCloseMenu();
+
+    switch (action) {
+      case 'edit':
+        handleEditTemplate(template);
+        break;
+      case 'submit':
+        handleSubmitForApproval(template);
+        break;
+      case 'refresh':
+        handleRefreshStatus(template);
+        break;
+      case 'delete':
+        handleDeleteTemplate(template.id);
+        break;
+      default:
+        break;
+    }
+  };
+
+  // ===========================================================================
+  // RENDER FUNCTIONS
+  // ===========================================================================
+
+  const renderSetupTab = () => (
+    <Box sx={{ p: 3 }}>
+      <Grid container spacing={3}>
+        {/* Phone Number Setup */}
+        <Grid item xs={12} md={6}>
+          <Card>
+            <CardContent>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 2 }}>
+                <PhoneIcon sx={{ color: '#25D366', fontSize: 28 }} />
+                <CardTitle sx={{ fontWeight: 600, fontSize: '1rem' }}>
+                  Phone Number
+                </CardTitle>
+              </Box>
+
+              {!account ? (
+                <>
+                  <TextField
+                    fullWidth
+                    label="Phone Number"
+                    placeholder="+1234567890"
+                    value={phoneNumber}
+                    onChange={(e) => setPhoneNumber(e.target.value)}
+                    sx={{ mb: 2 }}
+                    size="small"
+                  />
+                  <TextField
+                    fullWidth
+                    label="Business Name"
+                    value={businessName}
+                    onChange={(e) => setBusinessName(e.target.value)}
+                    sx={{ mb: 2 }}
+                    size="small"
+                  />
+                  <Button
+                    fullWidth
+                    variant="contained"
+                    onClick={handleCreateAccount}
+                    disabled={!phoneNumber || !businessName || setupLoading}
+                    startIcon={setupLoading ? <CircularProgress size={16} /> : <CheckCircleIcon />}
+                  >
+                    Create Account
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <Typography variant="body2" sx={{ mb: 1, color: 'text.secondary' }}>
+                    Phone: {account.phone_number}
+                  </Typography>
+                  <Typography variant="body2" sx={{ mb: 2, color: 'text.secondary' }}>
+                    Business: {account.business_name}
+                  </Typography>
+
+                  {!account.verified && (
+                    <>
+                      {!codeRequested ? (
+                        <>
+                          <Typography variant="body2" sx={{ mb: 1, color: 'text.secondary', fontWeight: 500 }}>
+                            Request Verification Code
+                          </Typography>
+                          <FormControl component="fieldset" sx={{ mb: 2 }}>
+                            <RadioGroup
+                              row
+                              value={verificationMethod}
+                              onChange={(e) => setVerificationMethod(e.target.value)}
+                            >
+                              <FormControlLabel
+                                value="sms"
+                                control={<Radio size="small" />}
+                                label="SMS"
+                              />
+                              <FormControlLabel
+                                value="voice"
+                                control={<Radio size="small" />}
+                                label="Voice Call"
+                              />
+                            </RadioGroup>
+                          </FormControl>
+                          <Button
+                            fullWidth
+                            variant="contained"
+                            onClick={handleRequestVerificationCode}
+                            disabled={setupLoading}
+                            startIcon={setupLoading ? <CircularProgress size={16} /> : <PhoneIcon />}
+                            sx={{ mb: 1 }}
+                          >
+                            Request Verification Code
+                          </Button>
+                        </>
+                      ) : (
+                        <>
+                          <Alert severity="info" sx={{ mb: 2 }}>
+                            Verification code sent via {verificationMethod.toUpperCase()}.
+                            {verificationMethod === 'sms' ? ' Check your messages.' : ' You should receive a call shortly.'}
+                          </Alert>
+                          <TextField
+                            fullWidth
+                            label="Verification Code"
+                            value={verificationCode}
+                            onChange={(e) => setVerificationCode(e.target.value)}
+                            sx={{ mb: 2 }}
+                            size="small"
+                            placeholder="Enter 6-digit code"
+                          />
+                          <Box sx={{ display: 'flex', gap: 1 }}>
+                            <Button
+                              fullWidth
+                              variant="contained"
+                              onClick={handleVerifyPhone}
+                              disabled={!verificationCode || setupLoading}
+                              startIcon={setupLoading ? <CircularProgress size={16} /> : <CheckCircleIcon />}
+                            >
+                              Verify Phone
+                            </Button>
+                            <Button
+                              variant="outlined"
+                              onClick={handleRequestVerificationCode}
+                              disabled={setupLoading}
+                              startIcon={<RefreshIcon />}
+                            >
+                              Resend
+                            </Button>
+                          </Box>
+                        </>
+                      )}
+                    </>
+                  )}
+
+                  {account.verified && (
+                    <Chip
+                      label="Verified"
+                      color="success"
+                      icon={<CheckCircleIcon />}
+                      sx={{ fontWeight: 600 }}
+                    />
+                  )}
+                </>
+              )}
+            </CardContent>
+          </Card>
+        </Grid>
+
+        {/* WhatsApp API Key Check - Only show when account is verified */}
+        {account?.verified && (
+          <Grid item xs={12} md={6}>
+            <Card>
+              <CardContent>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 2 }}>
+                  <BusinessIcon sx={{ color: '#25D366', fontSize: 28 }} />
+                  <CardTitle sx={{ fontWeight: 600, fontSize: '1rem' }}>
+                    WhatsApp API Key
+                  </CardTitle>
+                </Box>
+
+                <Typography variant="body2" sx={{ mb: 2, color: 'text.secondary' }}>
+                  Check if WhatsApp API key exists for webhook authentication (internal use)
+                </Typography>
+
+                {/* Check Status */}
+                {apiKeyCheckStatus === 'checking' && (
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
+                    <CircularProgress size={16} />
+                    <Typography variant="body2">Checking API key...</Typography>
+                  </Box>
+                )}
+
+                {apiKeyCheckStatus === 'exists' && apiKeyDetails && (
+                  <Alert severity="success" sx={{ mb: 2 }}>
+                    <Typography variant="body2" sx={{ fontWeight: 600, mb: 0.5 }}>
+                      ✅ API Key Exists
+                    </Typography>
+                    <Typography variant="caption" sx={{ display: 'block' }}>
+                      Key ID: {apiKeyDetails.id}
+                    </Typography>
+                    <Typography variant="caption" sx={{ display: 'block' }}>
+                      Prefix: {apiKeyDetails.key_prefix || 'N/A'}
+                    </Typography>
+                    <Typography variant="caption" sx={{ display: 'block' }}>
+                      Created: {apiKeyDetails.created_at ? new Date(apiKeyDetails.created_at).toLocaleDateString() : 'N/A'}
+                    </Typography>
+                    {apiKeyDetails.total_calls !== undefined && (
+                      <Typography variant="caption" sx={{ display: 'block' }}>
+                        Total Calls: {apiKeyDetails.total_calls}
+                      </Typography>
+                    )}
+                  </Alert>
+                )}
+
+                {apiKeyCheckStatus === 'missing' && (
+                  <Alert severity="warning" sx={{ mb: 2 }}>
+                    <Typography variant="body2" sx={{ fontWeight: 600, mb: 0.5 }}>
+                      ❌ API Key Not Found
+                    </Typography>
+                    <Typography variant="caption">
+                      WhatsApp API key has not been created yet or was deleted.
+                    </Typography>
+                  </Alert>
+                )}
+
+                {/* Action Buttons */}
+                <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+                  <Button
+                    variant="outlined"
+                    size="small"
+                    onClick={handleCheckWhatsAppApiKey}
+                    disabled={apiKeyCheckStatus === 'checking'}
+                    startIcon={<RefreshIcon />}
+                  >
+                    Check API Key
+                  </Button>
+
+                  {apiKeyCheckStatus === 'missing' && (
+                    <Button
+                      variant="contained"
+                      size="small"
+                      onClick={handleManualCreateApiKey}
+                      disabled={apiKeyCheckStatus === 'checking'}
+                      startIcon={<AddIcon />}
+                    >
+                      Create API Key
+                    </Button>
+                  )}
+                </Box>
+              </CardContent>
+            </Card>
+          </Grid>
+        )}
+
+        {/* Account Health */}
+        {accountHealth && (
+          <Grid item xs={12}>
+            <Card>
+              <CardContent>
+                <CardTitle sx={{ fontWeight: 600, fontSize: '1rem', mb: 2 }}>
+                  Account Health
+                </CardTitle>
+                <Grid container spacing={2}>
+                  <Grid item xs={12} sm={4}>
+                    <HelperText sx={{ color: 'text.secondary' }}>
+                      Status
+                    </HelperText>
+                    <Typography variant="body1" sx={{ fontWeight: 600 }}>
+                      {accountHealth.status}
+                    </Typography>
+                  </Grid>
+                  <Grid item xs={12} sm={4}>
+                    <HelperText sx={{ color: 'text.secondary' }}>
+                      Quality Rating
+                    </HelperText>
+                    <Typography variant="body1" sx={{ fontWeight: 600 }}>
+                      {accountHealth.quality_rating}
+                    </Typography>
+                  </Grid>
+                  <Grid item xs={12} sm={4}>
+                    <HelperText sx={{ color: 'text.secondary' }}>
+                      Last Activity
+                    </HelperText>
+                    <Typography variant="body1" sx={{ fontWeight: 600 }}>
+                      {accountHealth.last_activity || 'N/A'}
+                    </Typography>
+                  </Grid>
+                </Grid>
+              </CardContent>
+            </Card>
+          </Grid>
+        )}
+      </Grid>
+    </Box>
+  );
+
+  const renderTemplatesTab = () => {
+    const filteredTemplates = filterTemplates();
+
+    return (
+      <Box sx={{ p: 3 }}>
+        {/* Header with Actions */}
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
+          <CardTitle sx={{ fontWeight: 600 }}>
+            WhatsApp Message Templates
+          </CardTitle>
+          <Button
+            variant="contained"
+            startIcon={<AddIcon />}
+            onClick={handleCreateTemplate}
+            disabled={!account?.verified}
+          >
+            Create Template
+          </Button>
+        </Box>
+
+        {/* Filters */}
+        <Grid container spacing={2} sx={{ mb: 3 }}>
+          <Grid item xs={12} sm={6} md={4}>
+            <TextField
+              fullWidth
+              size="small"
+              placeholder="Search templates..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              InputProps={{
+                startAdornment: <SearchIcon sx={{ mr: 1, color: 'text.secondary' }} />
+              }}
+            />
+          </Grid>
+          <Grid item xs={12} sm={6} md={4}>
+            <FormControl fullWidth size="small">
+              <InputLabel>Status Filter</InputLabel>
+              <Select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                label="Status Filter"
+              >
+                <MenuItem value="all">All Statuses</MenuItem>
+                <MenuItem value="draft">Draft</MenuItem>
+                <MenuItem value="submitted">Submitted</MenuItem>
+                <MenuItem value="pending">Pending</MenuItem>
+                <MenuItem value="approved">Approved</MenuItem>
+                <MenuItem value="rejected">Rejected</MenuItem>
+              </Select>
+            </FormControl>
+          </Grid>
+        </Grid>
+
+        {/* Templates List */}
+        {templatesLoading ? (
+          <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
+            <CircularProgress />
+          </Box>
+        ) : filteredTemplates.length === 0 ? (
+          <Card>
+            <CardContent sx={{ textAlign: 'center', py: 6 }}>
+              <Typography variant="body1" color="text.secondary" sx={{ mb: 2 }}>
+                {templates.length === 0
+                  ? 'No templates yet. Create your first template to get started.'
+                  : 'No templates match your filters.'}
+              </Typography>
+              {templates.length === 0 && account?.verified && (
+                <Button
+                  variant="outlined"
+                  startIcon={<AddIcon />}
+                  onClick={handleCreateTemplate}
+                >
+                  Create Your First Template
+                </Button>
+              )}
+            </CardContent>
+          </Card>
+        ) : (
+          <TableContainer component={Paper}>
+            <Table>
+              <TableHead>
+                <TableRow>
+                  <TableCell>Name</TableCell>
+                  <TableCell>Category</TableCell>
+                  <TableCell>Language</TableCell>
+                  <TableCell>Status</TableCell>
+                  <TableCell>Created</TableCell>
+                  <TableCell align="right">Actions</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {filteredTemplates.map((template) => (
+                  <TableRow
+                    key={template.id}
+                    hover
+                    onClick={() => handlePreviewTemplate(template)}
+                    sx={{
+                      cursor: 'pointer',
+                      '&:hover': {
+                        bgcolor: 'action.hover'
+                      }
+                    }}
+                  >
+                    <TableCell>
+                      <Typography variant="body2" sx={{ fontWeight: 500 }}>
+                        {template.name}
+                      </Typography>
+                    </TableCell>
+                    <TableCell>
+                      <Chip label={template.category} size="small" />
+                    </TableCell>
+                    <TableCell>
+                      <Typography variant="body2" sx={{ textTransform: 'uppercase' }}>
+                        {template.language}
+                      </Typography>
+                    </TableCell>
+                    <TableCell>
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                        <Box
+                          sx={{
+                            width: 10,
+                            height: 10,
+                            borderRadius: '50%',
+                            bgcolor: getStatusDotColor(template.status)
+                          }}
+                        />
+                        <Typography variant="body2" sx={{ textTransform: 'capitalize' }}>
+                          {template.status}
+                        </Typography>
+                      </Box>
+                    </TableCell>
+                    <TableCell>
+                      <Typography variant="caption">
+                        {template.created_at ? new Date(template.created_at.seconds * 1000).toLocaleDateString() : '-'}
+                      </Typography>
+                    </TableCell>
+                    <TableCell align="right">
+                      <Tooltip title="Actions">
+                        <IconButton
+                          size="small"
+                          onClick={(e) => handleOpenMenu(e, template)}
+                        >
+                          <MoreVertIcon fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        )}
+
+        {/* Actions Menu */}
+        <Menu
+          anchorEl={menuAnchorEl}
+          open={Boolean(menuAnchorEl)}
+          onClose={handleCloseMenu}
+          anchorOrigin={{
+            vertical: 'bottom',
+            horizontal: 'right',
+          }}
+          transformOrigin={{
+            vertical: 'top',
+            horizontal: 'right',
+          }}
+        >
+          {selectedTemplateForMenu && (
+            <>
+              {/* Edit - always available */}
+              <MenuItem onClick={() => handleMenuAction('edit', selectedTemplateForMenu)}>
+                <ListItemIcon>
+                  <EditIcon fontSize="small" />
+                </ListItemIcon>
+                <ListItemText>Edit Template</ListItemText>
+              </MenuItem>
+
+              {/* Submit/Resubmit - for draft, rejected, approved */}
+              {(selectedTemplateForMenu.status === 'draft' ||
+                selectedTemplateForMenu.status === 'rejected' ||
+                selectedTemplateForMenu.status === 'approved') && (
+                <MenuItem onClick={() => handleMenuAction('submit', selectedTemplateForMenu)}>
+                  <ListItemIcon>
+                    <SubmitIcon fontSize="small" color="primary" />
+                  </ListItemIcon>
+                  <ListItemText>
+                    {selectedTemplateForMenu.status === 'draft'
+                      ? 'Submit for Approval'
+                      : 'Resubmit for Approval'}
+                  </ListItemText>
+                </MenuItem>
+              )}
+
+              {/* Refresh Status - for submitted, pending */}
+              {(selectedTemplateForMenu.status === 'submitted' ||
+                selectedTemplateForMenu.status === 'pending') && (
+                <MenuItem onClick={() => handleMenuAction('refresh', selectedTemplateForMenu)}>
+                  <ListItemIcon>
+                    <RefreshIcon fontSize="small" />
+                  </ListItemIcon>
+                  <ListItemText>Refresh Status</ListItemText>
+                </MenuItem>
+              )}
+
+              {/* Divider before delete */}
+              <Divider />
+
+              {/* Delete - always available */}
+              <MenuItem onClick={() => handleMenuAction('delete', selectedTemplateForMenu)}>
+                <ListItemIcon>
+                  <DeleteIcon fontSize="small" color="error" />
+                </ListItemIcon>
+                <ListItemText sx={{ color: 'error.main' }}>Delete Template</ListItemText>
+              </MenuItem>
+            </>
+          )}
+        </Menu>
+
+        {/* Template Dialog */}
+        <Dialog
+          open={templateDialogOpen}
+          onClose={() => setTemplateDialogOpen(false)}
+          maxWidth="md"
+          fullWidth
+        >
+          <DialogTitle>
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <CardTitle>
+                {templateMode === 'create' ? 'Create New Template' : 'Edit Template'}
+              </CardTitle>
+              <IconButton onClick={() => setTemplateDialogOpen(false)} size="small">
+                <CloseIcon />
+              </IconButton>
+            </Box>
+          </DialogTitle>
+          <DialogContent dividers>
+            <Grid container spacing={2}>
+              {/* Template Name */}
+              <Grid item xs={12}>
+                <TextField
+                  fullWidth
+                  label="Template Name"
+                  value={templateForm.name}
+                  onChange={(e) => setTemplateForm({ ...templateForm, name: e.target.value.toLowerCase().replace(/\s+/g, '_') })}
+                  error={!!formErrors.name}
+                  helperText={formErrors.name || 'Use only lowercase letters, numbers, and underscores'}
+                  disabled={templateMode === 'edit'}
+                />
+              </Grid>
+
+              {/* Category and Language */}
+              <Grid item xs={12} sm={6}>
+                <FormControl fullWidth error={!!formErrors.category}>
+                  <InputLabel>Category</InputLabel>
+                  <Select
+                    value={templateForm.category}
+                    onChange={(e) => setTemplateForm({ ...templateForm, category: e.target.value })}
+                    label="Category"
+                  >
+                    <MenuItem value="marketing">Marketing</MenuItem>
+                    <MenuItem value="utility">Utility</MenuItem>
+                  </Select>
+                </FormControl>
+              </Grid>
+              <Grid item xs={12} sm={6}>
+                <FormControl fullWidth>
+                  <InputLabel>Language</InputLabel>
+                  <Select
+                    value={templateForm.language}
+                    onChange={(e) => setTemplateForm({ ...templateForm, language: e.target.value })}
+                    label="Language"
+                  >
+                    <MenuItem value="en">English</MenuItem>
+                    <MenuItem value="es">Spanish</MenuItem>
+                    <MenuItem value="fr">French</MenuItem>
+                    <MenuItem value="de">German</MenuItem>
+                    <MenuItem value="pt">Portuguese</MenuItem>
+                    <MenuItem value="hi">Hindi</MenuItem>
+                  </Select>
+                </FormControl>
+              </Grid>
+
+              {/* Header Image */}
+              <Grid item xs={12}>
+                <Accordion>
+                  <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                    <Typography variant="body2" sx={{ fontWeight: 500 }}>
+                      Header Image (Optional)
+                    </Typography>
+                  </AccordionSummary>
+                  <AccordionDetails>
+                    <TextField
+                      fullWidth
+                      label="Image URL"
+                      value={templateForm.header?.image_url || ''}
+                      onChange={(e) => setTemplateForm({
+                        ...templateForm,
+                        header: {
+                          type: 'IMAGE',
+                          image_url: e.target.value
+                        }
+                      })}
+                      placeholder="https://example.com/product-image.jpg"
+                      helperText="URL to the product or header image (must be publicly accessible)"
+                      error={!!formErrors.header}
+                    />
+                    {formErrors.header && (
+                      <Typography variant="caption" color="error" sx={{ mt: 0.5, display: 'block' }}>
+                        {formErrors.header}
+                      </Typography>
+                    )}
+                  </AccordionDetails>
+                </Accordion>
+              </Grid>
+
+              {/* Body */}
+              <Grid item xs={12}>
+                <TextField
+                  fullWidth
+                  multiline
+                  rows={6}
+                  label="Message Body"
+                  value={templateForm.body}
+                  onChange={(e) => setTemplateForm({ ...templateForm, body: e.target.value })}
+                  error={!!formErrors.body}
+                  helperText={formErrors.body || `${templateForm.body.length}/1024 characters. Use {{1}}, {{2}} for variables.`}
+                />
+              </Grid>
+
+              {/* Footer */}
+              <Grid item xs={12}>
+                <TextField
+                  fullWidth
+                  label="Footer (optional)"
+                  value={templateForm.footer}
+                  onChange={(e) => setTemplateForm({ ...templateForm, footer: e.target.value })}
+                  error={!!formErrors.footer}
+                  helperText={formErrors.footer || `${templateForm.footer.length}/60 characters`}
+                />
+              </Grid>
+
+              {/* Info Alert */}
+              <Grid item xs={12}>
+                <Alert severity="info">
+                  Templates must be approved by WhatsApp before use. Approval typically takes 5 minutes to 24 hours.
+                  Template names cannot be reused for 30 days after deletion.
+                </Alert>
+              </Grid>
+            </Grid>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setTemplateDialogOpen(false)}>Cancel</Button>
+            <Button
+              variant="contained"
+              onClick={handleSaveTemplate}
+              disabled={templateLoading}
+              startIcon={templateLoading ? <CircularProgress size={16} /> : null}
+            >
+              {templateMode === 'create' ? 'Create Template' : 'Update Template'}
+            </Button>
+          </DialogActions>
+        </Dialog>
+
+        {!account?.verified && (
+          <Alert severity="warning" sx={{ mt: 2 }}>
+            Please complete phone verification in the Setup tab before creating templates.
+          </Alert>
+        )}
+      </Box>
+    );
+  };
+
+  // No agent selected state
+  if (!agentId) {
+    return (
+      <EmptyState
+        icon={WhatsAppIcon}
+        title="No Agent Selected"
+        subtitle="Please select an agent from the sidebar to manage WhatsApp integration."
+        useCard={true}
+      />
+    );
+  }
+
+  // Loading state
+  if (loading) {
+    return (
+      <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '400px' }}>
+        <CircularProgress />
+      </Box>
+    );
+  }
+
+  return (
+    <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+      {/* Header */}
+      <Box sx={{ px: 2.5, py: 1.5, borderBottom: 1, borderColor: 'divider', bgcolor: 'background.paper' }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+            <Box
+              component="img"
+              src={whatsappLogo}
+              alt="WhatsApp"
+              sx={{ width: 28, height: 28, objectFit: 'contain' }}
+            />
+            <Box>
+              <Typography variant="subtitle1" sx={{ fontWeight: 700, fontSize: '0.9375rem', letterSpacing: '-0.01em' }}>
+                WhatsApp Integration
+              </Typography>
+              <Typography variant="caption" sx={{ fontSize: '0.75rem', color: 'text.secondary', fontWeight: 400 }}>
+                Configure and manage WhatsApp integration for your agent
+              </Typography>
+            </Box>
+          </Box>
+          <Tooltip title="Refresh">
+            <IconButton onClick={loadAccount} size="small">
+              <RefreshIcon sx={{ fontSize: 18 }} />
+            </IconButton>
+          </Tooltip>
+        </Box>
+      </Box>
+
+      {/* Tabs */}
+      <Box sx={{ borderBottom: 1, borderColor: 'divider' }}>
+        <Tabs value={activeTab} onChange={(e, newValue) => setActiveTab(newValue)}>
+          <Tab label="Setup" />
+          <Tab label="Templates" />
+          <Tab label="Contacts" />
+          <Tab label="Outreach" />
+        </Tabs>
+      </Box>
+
+      {/* Tab Content */}
+      <Box sx={{ flex: 1, overflow: 'auto' }}>
+        {activeTab === 0 && renderSetupTab()}
+        {activeTab === 1 && renderTemplatesTab()}
+        {activeTab === 2 && (
+          <ContactsTab
+            agentId={agentId}
+            view="contacts"
+            createNotification={(type, message) => setNotification(createNotification(type, message))}
+          />
+        )}
+        {activeTab === 3 && (
+          <ContactsTab
+            agentId={agentId}
+            view="outreach"
+            createNotification={(type, message) => setNotification(createNotification(type, message))}
+          />
+        )}
+      </Box>
+
+      {/* Sender Exists Dialog */}
+      <Dialog
+        open={senderExistsDialog}
+        onClose={() => setSenderExistsDialog(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>
+          WhatsApp Sender Already Registered
+        </DialogTitle>
+        <DialogContent>
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            This phone number is already registered as a WhatsApp sender with Twilio.
+          </Alert>
+
+          {existingSenderInfo && (
+            <Box sx={{ mb: 3 }}>
+              <Typography variant="body2" color="text.secondary" gutterBottom>
+                Existing Sender Profile:
+              </Typography>
+              <Typography variant="body1" sx={{ fontWeight: 600 }}>
+                Business Name: {existingSenderInfo.name || 'Not set'}
+              </Typography>
+            </Box>
+          )}
+
+          <Typography variant="body2" sx={{ mb: 2 }}>
+            You can either use the existing sender as-is, or update the sender profile with a new business name.
+          </Typography>
+
+          <TextField
+            fullWidth
+            label="New Business Name (for update)"
+            value={updateBusinessName}
+            onChange={(e) => setUpdateBusinessName(e.target.value)}
+            helperText="Only needed if you want to update the sender profile"
+            sx={{ mt: 2 }}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setSenderExistsDialog(false)} disabled={setupLoading}>
+            Cancel
+          </Button>
+          <Button
+            onClick={handleUseExistingSender}
+            disabled={setupLoading}
+            variant="outlined"
+            startIcon={setupLoading ? <CircularProgress size={16} /> : <CheckCircleIcon />}
+          >
+            Use Existing
+          </Button>
+          <Button
+            onClick={handleUpdateSenderProfile}
+            disabled={!updateBusinessName || setupLoading}
+            variant="contained"
+            startIcon={setupLoading ? <CircularProgress size={16} /> : <RefreshIcon />}
+          >
+            Update Profile
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Template Preview Dialog */}
+      <Dialog
+        open={previewDialogOpen}
+        onClose={() => setPreviewDialogOpen(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <CardTitle>
+              Template Preview
+            </CardTitle>
+            <IconButton onClick={() => setPreviewDialogOpen(false)} size="small">
+              <CloseIcon />
+            </IconButton>
+          </Box>
+        </DialogTitle>
+        <DialogContent>
+          {previewTemplate && (
+            <Box>
+              {/* WhatsApp-style message bubble */}
+              <Box
+                sx={{
+                  maxWidth: '80%',
+                  bgcolor: '#E7FFDB',
+                  borderRadius: '8px',
+                  p: 0,
+                  boxShadow: '0 1px 2px rgba(0,0,0,0.1)',
+                  overflow: 'hidden'
+                }}
+              >
+                {/* Header Image */}
+                {previewTemplate.header?.image_url && (
+                  <Box
+                    component="img"
+                    src={previewTemplate.header.image_url}
+                    alt="Template header"
+                    sx={{
+                      width: '100%',
+                      display: 'block',
+                      maxHeight: '300px',
+                      objectFit: 'cover'
+                    }}
+                    onError={(e) => {
+                      e.target.style.display = 'none';
+                    }}
+                  />
+                )}
+
+                {/* Body */}
+                <Box sx={{ p: 2 }}>
+                  <Typography
+                    variant="body2"
+                    sx={{
+                      whiteSpace: 'pre-wrap',
+                      wordBreak: 'break-word',
+                      color: '#000',
+                      fontSize: '14px',
+                      lineHeight: 1.5
+                    }}
+                  >
+                    {previewTemplate.body}
+                  </Typography>
+
+                  {/* Footer */}
+                  {previewTemplate.footer && (
+                    <Typography
+                      variant="caption"
+                      sx={{
+                        display: 'block',
+                        mt: 1,
+                        color: '#667781',
+                        fontSize: '12px',
+                        fontStyle: 'italic'
+                      }}
+                    >
+                      {previewTemplate.footer}
+                    </Typography>
+                  )}
+                </Box>
+
+                {/* Timestamp (mock) */}
+                <Box sx={{ px: 2, pb: 1, textAlign: 'right' }}>
+                  <Typography variant="caption" sx={{ color: '#667781', fontSize: '11px' }}>
+                    {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  </Typography>
+                </Box>
+              </Box>
+
+              {/* Template Details */}
+              <Box sx={{ mt: 3, p: 2, bgcolor: '#f5f5f5', borderRadius: '8px' }}>
+                <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 1 }}>
+                  Template Details
+                </Typography>
+                <Grid container spacing={1}>
+                  <Grid item xs={6}>
+                    <Typography variant="caption" color="text.secondary">
+                      Name:
+                    </Typography>
+                    <Typography variant="body2" sx={{ fontWeight: 500 }}>
+                      {previewTemplate.name}
+                    </Typography>
+                  </Grid>
+                  <Grid item xs={6}>
+                    <Typography variant="caption" color="text.secondary">
+                      Status:
+                    </Typography>
+                    <Typography variant="body2" sx={{ fontWeight: 500, textTransform: 'capitalize' }}>
+                      <Chip
+                        label={previewTemplate.status}
+                        size="small"
+                        color={getStatusColor(previewTemplate.status)}
+                        sx={{ height: '20px', fontSize: '11px' }}
+                      />
+                    </Typography>
+                  </Grid>
+                  <Grid item xs={6}>
+                    <Typography variant="caption" color="text.secondary">
+                      Category:
+                    </Typography>
+                    <Typography variant="body2" sx={{ fontWeight: 500, textTransform: 'capitalize' }}>
+                      {previewTemplate.category}
+                    </Typography>
+                  </Grid>
+                  <Grid item xs={6}>
+                    <Typography variant="caption" color="text.secondary">
+                      Language:
+                    </Typography>
+                    <Typography variant="body2" sx={{ fontWeight: 500, textTransform: 'uppercase' }}>
+                      {previewTemplate.language}
+                    </Typography>
+                  </Grid>
+                </Grid>
+              </Box>
+            </Box>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPreviewDialogOpen(false)}>Close</Button>
+          {previewTemplate && (
+            <Button
+              variant="contained"
+              onClick={() => {
+                setPreviewDialogOpen(false);
+                handleEditTemplate(previewTemplate);
+              }}
+              startIcon={<EditIcon />}
+            >
+              Edit Template
+            </Button>
+          )}
+        </DialogActions>
+      </Dialog>
+
+      {/* Notification System */}
+      {notification && (
+        <NotificationSystem
+          notification={notification}
+          onClose={() => setNotification(null)}
+        />
+      )}
+    </Box>
+  );
+};
+
+export default WhatsAppIntegrationContent;

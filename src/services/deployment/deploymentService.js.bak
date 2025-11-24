@@ -1,0 +1,895 @@
+/**
+ * Deployment Service
+ * 
+ * Service for managing optimized agent deployments via the deployment service API
+ * and Firestore for deployment history
+ */
+
+import { getServiceApiUrl, agentBuilderApi } from '../config/apiConfig';
+import { db, Collections, DocumentFields } from '../../utils/firebase';
+// import { collection, query, where, orderBy, getDocs, doc, getDoc, onSnapshot } from 'firebase/firestore'; // REMOVED: Firebase/Firestore
+import { logActivity } from '../activity/activityService';
+import { AGENT_ACTIVITIES, RESOURCE_TYPES, ACTIVITY_SEVERITY } from '../../constants/activityTypes';
+
+class DeploymentService {
+  constructor() {
+    // Shared deployment cache system
+    this.deploymentsCache = new Map(); // agentId -> deployments[]
+    this.activeSubscriptions = new Map(); // agentId -> unsubscribe function
+    this.pendingSubscriptions = new Map(); // agentId_creating -> promise for subscription creation
+
+    // Bind methods to ensure context is preserved
+    this.subscribeToDeploymentUpdates = this.subscribeToDeploymentUpdates.bind(this);
+    this._createSubscriptionInternal = this._createSubscriptionInternal.bind(this);
+  }
+
+  getBaseURL() {
+    try {
+      // Get agent launcher URL from environment variables
+      const agentLauncherUrl = getServiceApiUrl('agent-launcher');
+      if (!agentLauncherUrl) {
+        throw new Error('Agent launcher service not configured in environment variables');
+      }
+      return agentLauncherUrl;
+    } catch (error) {
+      console.error('Failed to get agent launcher URL from environment variables:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Deploy an agent using backend API
+   *
+   * Replaces direct Firestore write with backend API call to agent-builder-ai-service.
+   * The backend handles deployment document creation and Cloud Run job triggering.
+   */
+  async deployAgent(agentId, options = {}) {
+    try {
+      // Call backend API to deploy agent
+      const { agentBuilderApi } = await import('../config/apiConfig');
+      const response = await agentBuilderApi.post(`/api/agents/${agentId}/deploy`);
+      const responseData = response.data;
+
+      console.log('✅ Backend API deployment response:', responseData);
+
+      // Return response in format expected by frontend
+      return {
+        deployment_id: responseData.deployment_id,
+        status: responseData.status || 'queued',
+        message: responseData.message || 'Deployment initiated successfully',
+        agent_id: responseData.agent_id
+      };
+    } catch (error) {
+      console.error('Error deploying agent via backend API:', error);
+
+      // Extract error message from axios error response
+      const errorMessage = error.response?.data?.detail || error.response?.data?.message || error.message;
+      throw new Error(errorMessage);
+    }
+  }
+
+  /**
+   * Update deployment document via backend API
+   */
+  async updateDeploymentDocument(deploymentId, updateData) {
+    try {
+      // Extract agent_id from updateData or get it from deployment
+      const agentId = updateData.agent_id || 'unknown';
+
+      // Use backend API to update deployment
+      await agentBuilderApi.patch(
+        `/api/agents/${agentId}/deployments/${deploymentId}`,
+        { updates: updateData }
+      );
+
+      console.log('Deployment updated via backend API:', deploymentId);
+    } catch (error) {
+      console.error('Error updating deployment document:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Update specific progress step via backend API
+   */
+  async updateProgressStep(deploymentId, stepName, stepStatus, stepMessage = null) {
+    try {
+      // Get deployment to extract agent_id
+      const deploymentRef = doc(db, Collections.AGENT_DEPLOYMENTS, deploymentId);
+      const deploymentDoc = await getDoc(deploymentRef);
+
+      if (!deploymentDoc.exists()) {
+        throw new Error('Deployment document not found');
+      }
+
+      const data = deploymentDoc.data();
+      const agentId = data.agent_id;
+
+      // Use backend API to update progress step
+      await agentBuilderApi.patch(
+        `/api/agents/${agentId}/deployments/${deploymentId}/progress-step`,
+        {
+          step_name: stepName,
+          step_status: stepStatus,
+          step_message: stepMessage
+        }
+      );
+
+      console.log(`Progress step "${stepName}" updated to ${stepStatus} via backend API`);
+    } catch (error) {
+      console.error('Error updating progress step:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get deployment status and progress - checks Firestore first, falls back to API
+   */
+  async getDeploymentStatus(deploymentId) {
+    try {
+      // First try to get from Firestore
+      const deploymentDoc = doc(db, Collections.AGENT_DEPLOYMENTS, deploymentId);
+      const docSnapshot = await getDoc(deploymentDoc);
+      
+      if (docSnapshot.exists()) {
+        const data = docSnapshot.data();
+        return {
+          [DocumentFields.DEPLOYMENT_ID]: deploymentId,
+          ...data,
+          // Convert Firestore timestamps to ISO strings for consistency
+          [DocumentFields.CREATED_AT]: data[DocumentFields.CREATED_AT]?.toDate?.()?.toISOString() || data[DocumentFields.CREATED_AT],
+          [DocumentFields.UPDATED_AT]: data[DocumentFields.UPDATED_AT]?.toDate?.()?.toISOString() || data[DocumentFields.UPDATED_AT]
+        };
+      }
+    } catch (error) {
+      console.error('Error getting deployment status:', error);
+      throw error;
+    }
+  }
+
+
+  /**
+   * Cancel a deployment via backend API
+   * The backend will update Firestore which triggers the cloud function
+   */
+  async cancelDeployment(deploymentId) {
+    try {
+      // Get deployment to extract agent_id
+      const deploymentRef = doc(db, Collections.AGENT_DEPLOYMENTS, deploymentId);
+      const deploymentDoc = await getDoc(deploymentRef);
+
+      if (!deploymentDoc.exists()) {
+        throw new Error('Deployment document not found');
+      }
+
+      const data = deploymentDoc.data();
+      const agentId = data.agent_id;
+
+      // Use backend API to cancel deployment
+      const response = await agentBuilderApi.post(
+        `/api/agents/${agentId}/deployments/${deploymentId}/cancel`,
+        { reason: 'Deployment cancelled by user request' }
+      );
+
+      return {
+        status: 'cancelled',
+        deployment_id: deploymentId,
+        message: response.data.message || 'Deployment cancellation requested',
+        cancelled_at: new Date().toISOString()
+      };
+    } catch (error) {
+      console.error('Error canceling deployment:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get deployment queue status
+   */
+  async getQueueStatus() {
+    try {
+      const response = await fetch(`${this.baseURL}/api/queue`);
+      
+      if (!response.ok) {
+        throw new Error(`Failed to get queue status: ${response.status}`);
+      }
+
+      const result = await response.json();
+      return result;
+    } catch (error) {
+      console.error('Error getting queue status:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get deployment service health
+   */
+  async getServiceHealth() {
+    try {
+      const response = await fetch(`${this.baseURL}/`);
+      
+      if (!response.ok) {
+        throw new Error(`Service health check failed: ${response.status}`);
+      }
+
+      const result = await response.json();
+      return result;
+    } catch (error) {
+      console.error('Error checking service health:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Poll deployment status until completion using shared cached data
+   */
+  async pollDeploymentStatus(deploymentId, onProgress = null, options = {}) {
+    const { 
+      timeoutMs = 600000  // 10 minutes
+    } = options;
+
+    const startTime = Date.now();
+
+    // First, get the deployment to find the agent_id
+    const deploymentDoc = doc(db, Collections.AGENT_DEPLOYMENTS, deploymentId);
+    const deploymentSnapshot = await getDoc(deploymentDoc);
+    
+    if (!deploymentSnapshot.exists()) {
+      throw new Error('Deployment not found');
+    }
+    
+    const agentId = deploymentSnapshot.data().agent_id;
+
+    // Ensure we have a subscription for this agent (will use existing if available)
+    await this.subscribeToDeploymentUpdates(agentId, () => {
+      // This callback is just to ensure subscription exists
+      // The actual polling will use cached data
+    });
+
+    return new Promise((resolve, reject) => {
+      const checkDeploymentStatus = () => {
+        try {
+          // Check timeout
+          if (Date.now() - startTime > timeoutMs) {
+            clearInterval(pollInterval);
+            reject(new Error('Deployment polling timed out'));
+            return;
+          }
+
+          // Get deployments from cache
+          const cachedDeployments = this.deploymentsCache.get(agentId);
+          if (!cachedDeployments) {
+            // Cache not ready yet, continue polling
+            return;
+          }
+
+          // Find the specific deployment we're polling
+          const deployment = cachedDeployments.find(d => d.deployment_id === deploymentId);
+          
+          if (!deployment) {
+            // Deployment not found in cache yet, continue polling
+            return;
+          }
+
+          const status = {
+            deployment_id: deploymentId,
+            ...deployment
+          };
+          
+          // Call progress callback if provided
+          if (onProgress) {
+            onProgress(JSON.parse(JSON.stringify(status)));
+          }
+
+          // Check if deployment is complete
+          if (status.status === 'completed' || status.status === 'deployed') {
+            clearInterval(pollInterval);
+            
+            // Log successful deployment completion
+            logActivity({
+              activity_type: AGENT_ACTIVITIES.DEPLOYED,
+              resource_type: RESOURCE_TYPES.DEPLOYMENT,
+              resource_id: deploymentId,
+              related_resource_type: RESOURCE_TYPES.AGENT,
+              related_resource_id: status.agent_id,
+              activity_details: {
+                deployment_id: deploymentId,
+                agent_id: status.agent_id,
+                deployment_type: 'optimized',
+                status: 'completed',
+                service_url: status.service_url,
+                progress_percentage: status.progress_percentage || 100,
+                completion_time: new Date().toISOString()
+              }
+            }).catch(logError => {
+              console.error('Failed to log deployment completion activity:', logError);
+            });
+            
+            // Update agent deployment status if deployment was successful
+            this.updateAgentDeploymentStatus(status.agent_id, status)
+              .then(() => {
+                console.log('Agent deployment status updated successfully');
+              })
+              .catch((updateError) => {
+                console.error('Failed to update agent deployment status:', updateError);
+                // Don't reject the promise - deployment still succeeded
+              });
+            
+            resolve(status);
+            return;
+          }
+
+          // Check if deployment failed
+          if (status.status === 'failed' || status.status === 'cancelled') {
+            clearInterval(pollInterval);
+            
+            // Log deployment failure
+            logActivity({
+              activity_type: AGENT_ACTIVITIES.DEPLOYMENT_FAILED,
+              resource_type: RESOURCE_TYPES.DEPLOYMENT,
+              resource_id: deploymentId,
+              related_resource_type: RESOURCE_TYPES.AGENT,
+              related_resource_id: status.agent_id,
+              severity: ACTIVITY_SEVERITY.ERROR,
+              activity_details: {
+                deployment_id: deploymentId,
+                agent_id: status.agent_id,
+                deployment_type: 'optimized',
+                status: status.status,
+                error_message: status.error_message,
+                progress_percentage: status.progress_percentage || 0,
+                current_step: status.current_step,
+                failure_time: new Date().toISOString()
+              }
+            }).catch(logError => {
+              console.error('Failed to log deployment failure activity:', logError);
+            });
+            
+            reject(new Error(String(status.error_message || `Deployment ${status.status}`)));
+            return;
+          }
+
+          // Continue polling for other statuses
+
+        } catch (error) {
+          clearInterval(pollInterval);
+          reject(error);
+        }
+      };
+
+      // Start polling with interval (every 1 second)
+      const pollInterval = setInterval(checkDeploymentStatus, 1000);
+      
+      // Initial check
+      checkDeploymentStatus();
+
+      // Set up timeout to clean up polling
+      setTimeout(() => {
+        clearInterval(pollInterval);
+        reject(new Error('Deployment polling timed out'));
+      }, timeoutMs);
+    });
+  }
+  /**
+   * Subscribe to deployment updates in real-time
+   * Uses shared caching system to avoid duplicate subscriptions
+   */
+  async subscribeToDeploymentUpdates(agentId, onUpdate, onError = null) {
+      // Validate agentId parameter
+      if (!agentId || typeof agentId !== 'string' || agentId.trim() === '') {
+        const error = new Error('Invalid agentId: must be a non-empty string');
+        console.error('🚨 [DEPLOYMENT-SERVICE] Invalid agentId parameter:', { agentId, type: typeof agentId });
+        if (onError) {
+          onError(error);
+        }
+        return () => {}; // Return empty unsubscribe function
+      }
+
+      // Check if subscription is already being created (to prevent race conditions)
+      const subscriptionKey = `${agentId}_creating`;
+      if (this.pendingSubscriptions?.has(subscriptionKey)) {
+        console.log('🔍 [DEPLOYMENT-SERVICE] Subscription already being created, waiting for completion:', agentId);
+        return this.pendingSubscriptions.get(subscriptionKey);
+      }
+
+      // Check if we already have an active subscription for this agent
+      if (this.activeSubscriptions.has(agentId)) {
+        console.log('🔍 [DEPLOYMENT-SERVICE] Using existing subscription for agentId:', agentId);
+        
+        // Return cached data immediately if available
+        if (this.deploymentsCache.has(agentId)) {
+          const cachedDeployments = this.deploymentsCache.get(agentId);
+          console.log('🔍 [DEPLOYMENT-SERVICE] Returning cached deployments:', cachedDeployments.length);
+          onUpdate(cachedDeployments);
+        }
+        
+        // Return the existing unsubscribe function
+        return this.activeSubscriptions.get(agentId);
+      }
+
+      console.log('🔍 [DEPLOYMENT-SERVICE] Creating new subscription for agentId:', agentId);
+      
+      // Mark subscription as being created to prevent race conditions
+      const subscriptionPromise = this._createSubscriptionInternal(agentId, onUpdate, onError);
+      this.pendingSubscriptions.set(subscriptionKey, subscriptionPromise);
+      
+      try {
+        const result = await subscriptionPromise;
+        this.pendingSubscriptions.delete(subscriptionKey);
+        return result;
+      } catch (error) {
+        this.pendingSubscriptions.delete(subscriptionKey);
+        throw error;
+      }
+  }
+
+  async _createSubscriptionInternal(agentId, onUpdate, onError) {
+      const deploymentsRef = collection(db, Collections.AGENT_DEPLOYMENTS);
+      
+      const q = query(
+        deploymentsRef, 
+        where('agent_id', '==', agentId),
+        orderBy('created_at', 'desc')
+      );
+
+      console.log('🔍 [DEPLOYMENT-SERVICE] Query created:', {
+        collection: Collections.AGENT_DEPLOYMENTS,
+        agentId: agentId,
+        queryType: 'with_orderBy_restored'
+      });
+
+      // HYBRID APPROACH: getDocs for initial load + onSnapshot for updates
+      console.log('🔍 [DEPLOYMENT-SERVICE] Step 1: Loading initial data with getDocs...');
+      
+      try {
+        // Step 1: Load initial data with getDocs (we know this works!)
+        const initialSnapshot = await getDocs(q);
+        console.log('🔍 [DEPLOYMENT-SERVICE] Initial load successful:', {
+          agentId,
+          documentCount: initialSnapshot.size,
+          empty: initialSnapshot.empty
+        });
+        
+        // Process initial documents
+        const initialDeployments = [];
+        initialSnapshot.forEach((doc) => {
+          const data = doc.data();
+          console.log('🔍 [DEPLOYMENT-SERVICE] Initial doc:', {
+            id: doc.id,
+            agent_id: data.agent_id,
+            status: data.status,
+            progress_percent: data.progress_percent,
+            created_at: data.created_at,
+            updated_at: data.updated_at
+          });
+          
+          initialDeployments.push({
+            deployment_id: doc.id,
+            ...data,
+            // Convert Firestore timestamps to ISO strings for consistency
+            created_at: data.created_at?.toDate?.()?.toISOString() || data.created_at,
+            updated_at: data.updated_at?.toDate?.()?.toISOString() || data.updated_at
+          });
+        });
+        
+        // Cache the initial deployments
+        this.deploymentsCache.set(agentId, initialDeployments);
+        
+        // Immediately call onUpdate with initial data (spread to create new array reference)
+        console.log('🔍 [DEPLOYMENT-SERVICE] Calling onUpdate with initial', initialDeployments.length, 'deployments');
+        onUpdate([...initialDeployments]);
+        
+      } catch (initialError) {
+        console.error('🚨 [DEPLOYMENT-SERVICE] Initial load failed:', initialError);
+        if (onError) {
+          onError(initialError);
+        }
+        return () => {}; // Return empty unsubscribe function
+      }
+      
+      // Step 2: Set up onSnapshot for real-time updates
+      console.log('🔍 [DEPLOYMENT-SERVICE] Step 2: Setting up real-time listener for future updates...');
+      
+      const unsubscribe = onSnapshot(q, (querySnapshot) => {
+          console.log('🎯 [DEPLOYMENT-SERVICE] ✅ REAL-TIME UPDATE! onSnapshot callback triggered:', {
+            agentId,
+            documentCount: querySnapshot.size,
+            metadata: querySnapshot.metadata,
+            fromCache: querySnapshot.metadata.fromCache,
+            hasPendingWrites: querySnapshot.metadata.hasPendingWrites,
+            empty: querySnapshot.empty,
+            callbackTimestamp: new Date().toISOString()
+          });
+          
+          const deployments = [];
+          querySnapshot.forEach((doc) => {
+            const data = doc.data();
+            console.log('🔍 [DEPLOYMENT-SERVICE] Real-time update doc:', {
+              id: doc.id,
+              agent_id: data.agent_id,
+              status: data.status,
+              progress_percent: data.progress_percent,
+              created_at: data.created_at,
+              updated_at: data.updated_at
+            });
+            
+            deployments.push({
+              deployment_id: doc.id,
+              ...data,
+              // Convert Firestore timestamps to ISO strings for consistency
+              created_at: data.created_at?.toDate?.()?.toISOString() || data.created_at,
+              updated_at: data.updated_at?.toDate?.()?.toISOString() || data.updated_at
+            });
+          });
+          
+          // Cache the updated deployments
+          this.deploymentsCache.set(agentId, deployments);
+
+          console.log('🔍 [DEPLOYMENT-SERVICE] Calling onUpdate with real-time', deployments.length, 'deployments');
+          onUpdate([...deployments]);
+        }, (error) => {
+          console.error('🚨 [DEPLOYMENT-SERVICE] onSnapshot ERROR:', error);
+          console.error('🚨 [DEPLOYMENT-SERVICE] Error details:', {
+            message: error.message,
+            code: error.code,
+            stack: error.stack,
+            agentId
+          });
+          
+          // Call the error callback if provided
+          if (onError) {
+            onError(error);
+          }
+        });
+      
+      // Create enhanced unsubscribe function that cleans up cache
+      const enhancedUnsubscribe = () => {
+        console.log('🔍 [DEPLOYMENT-SERVICE] Cleaning up subscription for agentId:', agentId);
+        // Remove from cache and active subscriptions
+        this.deploymentsCache.delete(agentId);
+        this.activeSubscriptions.delete(agentId);
+        // Clean up any pending subscription
+        const subscriptionKey = `${agentId}_creating`;
+        this.pendingSubscriptions.delete(subscriptionKey);
+        // Call the original unsubscribe
+        unsubscribe();
+      };
+      
+      // Store the unsubscribe function
+      this.activeSubscriptions.set(agentId, enhancedUnsubscribe);
+      
+      console.log('🔍 [DEPLOYMENT-SERVICE] Subscription setup complete for agentId:', agentId);
+      return enhancedUnsubscribe;
+  }
+
+  /**
+   * Subscribe to real-time updates for a single deployment document
+   * This is used to track progress of a specific deployment in real-time
+   *
+   * @param {string} deploymentId - The deployment ID to subscribe to
+   * @param {Function} onUpdate - Callback when deployment updates (receives deployment data)
+   * @param {Function} onError - Optional error callback
+   * @returns {Function} Unsubscribe function
+   */
+  subscribeToSingleDeployment(deploymentId, onUpdate, onError = null) {
+    if (!deploymentId || typeof deploymentId !== 'string' || deploymentId.trim() === '') {
+      const error = new Error('Invalid deploymentId: must be a non-empty string');
+      console.error('🚨 [DEPLOYMENT-SERVICE] Invalid deploymentId parameter:', { deploymentId });
+      if (onError) {
+        onError(error);
+      }
+      return () => {}; // Return empty unsubscribe function
+    }
+
+    console.log('🔍 [DEPLOYMENT-SERVICE] Setting up single deployment listener for:', deploymentId);
+
+    const deploymentRef = doc(db, Collections.AGENT_DEPLOYMENTS, deploymentId);
+
+    const unsubscribe = onSnapshot(deploymentRef, (docSnapshot) => {
+      if (!docSnapshot.exists()) {
+        console.warn('🚨 [DEPLOYMENT-SERVICE] Deployment document not found:', deploymentId);
+        return;
+      }
+
+      const data = docSnapshot.data();
+      const deployment = {
+        deployment_id: deploymentId,
+        ...data,
+        // Convert Firestore timestamps to ISO strings for consistency
+        created_at: data.created_at?.toDate?.()?.toISOString() || data.created_at,
+        updated_at: data.updated_at?.toDate?.()?.toISOString() || data.updated_at,
+        completed_at: data.completed_at?.toDate?.()?.toISOString() || data.completed_at,
+        started_at: data.started_at?.toDate?.()?.toISOString() || data.started_at
+      };
+
+      console.log('🔍 [DEPLOYMENT-SERVICE] Single deployment update:', {
+        deployment_id: deploymentId,
+        status: deployment.status,
+        progress_percent: deployment.progress_percent
+      });
+
+      onUpdate(deployment);
+
+      // Auto-cleanup on terminal states
+      const terminalStates = ['completed', 'failed', 'cancelled'];
+      if (terminalStates.includes(deployment.status?.toLowerCase())) {
+        console.log('🔍 [DEPLOYMENT-SERVICE] Deployment reached terminal state:', deployment.status);
+      }
+    }, (error) => {
+      console.error('🚨 [DEPLOYMENT-SERVICE] Single deployment subscription error:', error);
+      if (onError) {
+        onError(error);
+      }
+    });
+
+    return unsubscribe;
+  }
+
+  /**
+   * Get a single deployment by ID from Firestore
+   */
+  async getDeployment(deploymentId) {
+    try {
+      const deploymentDoc = doc(db, Collections.AGENT_DEPLOYMENTS, deploymentId);
+      const docSnapshot = await getDoc(deploymentDoc);
+
+      if (!docSnapshot.exists()) {
+        throw new Error('Deployment not found');
+      }
+
+      const data = docSnapshot.data();
+      return {
+        deployment_id: deploymentId,
+        ...data,
+        // Convert Firestore timestamps to ISO strings for consistency
+        created_at: data.created_at?.toDate?.()?.toISOString() || data.created_at,
+        updated_at: data.updated_at?.toDate?.()?.toISOString() || data.updated_at
+      };
+    } catch (error) {
+      console.error('Error getting deployment:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get agent server deployment status from agent_servers collection
+   */
+  async getAgentServerStatus(agentId) {
+    try {
+      const agentServerDoc = doc(db, 'agent_servers', agentId);
+      const docSnapshot = await getDoc(agentServerDoc);
+      
+      if (!docSnapshot.exists()) {
+        return false;
+      }
+      
+      const data = docSnapshot.data();
+      // Agent is deployed if it has a service_url and status is deployed
+      return Boolean(data.service_url && data.status === 'deployed');
+      
+    } catch (error) {
+      console.error('Error checking agent server status:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Subscribe to agent server status changes
+   */
+  subscribeToAgentServerStatus(agentId, onUpdate, onError = null) {
+    try {
+      const agentServerDoc = doc(db, 'agent_servers', agentId);
+      
+      const unsubscribe = onSnapshot(agentServerDoc, (docSnapshot) => {
+        if (docSnapshot.exists()) {
+          const data = docSnapshot.data();
+          const isDeployed = Boolean(data.service_url && data.status === 'active');
+          onUpdate(isDeployed, data);
+        } else {
+          onUpdate(false, null);
+        }
+      }, (error) => {
+        console.error('Agent server subscription error:', error);
+        if (onError) {
+          onError(error);
+        }
+      });
+      
+      return unsubscribe;
+    } catch (error) {
+      console.error('Error setting up agent server subscription:', error);
+      if (onError) {
+        onError(error);
+      }
+      return () => {}; // Return empty function as fallback
+    }
+  }
+
+  /**
+   * Get resource configuration from deployment
+   */
+  getResourceConfiguration(deployment) {
+    return deployment.resource_configuration || {};
+  }
+
+  /**
+   * Get deployment artifacts from deployment
+   */
+  getDeploymentArtifacts(deployment) {
+    return deployment.deployment_artifacts || {};
+  }
+
+  /**
+   * Get deployment metrics from deployment
+   */
+  getDeploymentMetrics(deployment) {
+    return deployment.deployment_metrics || {};
+  }
+
+  /**
+   * Get verification results from deployment
+   */
+  getVerificationResults(deployment) {
+    return deployment.verification || {};
+  }
+
+  /**
+   * Get error details from deployment
+   */
+  getErrorDetails(deployment) {
+    return deployment.error_details || null;
+  }
+
+  /**
+   * Get rollback information from deployment
+   */
+  getRollbackInfo(deployment) {
+    return deployment.rollback || {};
+  }
+
+  /**
+   * Check if deployment can be rolled back
+   */
+  canRollback(deployment) {
+    const rollback = this.getRollbackInfo(deployment);
+    return rollback.can_rollback && rollback.previous_deployment_id && !rollback.rollback_performed;
+  }
+
+  /**
+   * Get deployment environment information
+   */
+  getEnvironmentInfo(deployment) {
+    return deployment.environment || {};
+  }
+
+  /**
+   * Get formatted resource summary for display
+   */
+  getResourceSummary(deployment) {
+    const resourceConfig = this.getResourceConfiguration(deployment);
+    return {
+      prompts: resourceConfig.prompts?.sections_count || 0,
+      knowledgeFiles: resourceConfig.knowledge_base?.files_count || 0,
+      embeddingChunks: resourceConfig.embeddings?.chunks_count || 0,
+      mcpTools: resourceConfig.mcp_tools?.tools_count || 0,
+      features: resourceConfig.features || {}
+    };
+  }
+
+  /**
+   * Get formatted deployment timing information
+   */
+  getTimingInfo(deployment) {
+    const metrics = this.getDeploymentMetrics(deployment);
+    return {
+      totalTime: metrics.total_time_seconds || 0,
+      buildTime: metrics.build_time_seconds || 0,
+      deploymentTime: metrics.deployment_time_seconds || 0,
+      resourceGatheringTime: metrics.resource_gathering_time_seconds || 0,
+      promptOptimizationTime: metrics.prompt_optimization_time_seconds || 0
+    };
+  }
+
+  /**
+   * Get formatted cost estimation information
+   */
+  getCostInfo(deployment) {
+    const metrics = this.getDeploymentMetrics(deployment);
+    return {
+      estimatedMonthlyCost: metrics.estimated_monthly_cost || 0,
+      estimatedRequestsPerMonth: metrics.estimated_requests_per_month || 0,
+      dockerImageSizeMB: metrics.docker_image_size_mb || 0
+    };
+  }
+
+  /**
+   * Get deployment service URL from artifacts
+   */
+  getServiceUrl(deployment) {
+    const artifacts = this.getDeploymentArtifacts(deployment);
+    return artifacts.cloud_run_service?.service_url || deployment.service_url || null;
+  }
+
+  /**
+   * Get Docker image information
+   */
+  getDockerImageInfo(deployment) {
+    const artifacts = this.getDeploymentArtifacts(deployment);
+    return artifacts.docker_image || {};
+  }
+
+  /**
+   * Get system prompt information
+   */
+  getSystemPromptInfo(deployment) {
+    const artifacts = this.getDeploymentArtifacts(deployment);
+    return artifacts.system_prompt || {};
+  }
+
+  /**
+   * Update agent deployment status via backend API when deployment completes successfully
+   * Implements Google Cloud Run-like behavior where agent is "deployed" if any deployment succeeds
+   */
+  async updateAgentDeploymentStatus(agentId, deploymentData) {
+    try {
+      // Use backend API to update agent deployment status
+      const response = await agentBuilderApi.patch(
+        `/api/agents/${agentId}/deployment-status`,
+        {
+          deployment_id: deploymentData.deployment_id,
+          service_url: deploymentData.service_url || null
+        }
+      );
+
+      console.log(`Agent ${agentId} deployment status updated via backend API with active deployment ${deploymentData.deployment_id}`);
+
+      return {
+        success: response.data.success,
+        isFirstDeployment: response.data.is_first_deployment,
+        agentStatus: response.data.agent_status
+      };
+
+    } catch (error) {
+      console.error('Error updating agent deployment status:', error);
+      throw error;
+    }
+  }
+}
+
+// Create singleton instance
+const deploymentService = new DeploymentService();
+
+export default deploymentService;
+
+// Named exports for convenience - bind methods to maintain context
+export const deployAgent = deploymentService.deployAgent.bind(deploymentService);
+export const getDeploymentStatus = deploymentService.getDeploymentStatus.bind(deploymentService);
+export const cancelDeployment = deploymentService.cancelDeployment.bind(deploymentService);
+export const getQueueStatus = deploymentService.getQueueStatus.bind(deploymentService);
+export const getServiceHealth = deploymentService.getServiceHealth.bind(deploymentService);
+export const pollDeploymentStatus = deploymentService.pollDeploymentStatus.bind(deploymentService);
+export const subscribeToDeploymentUpdates = deploymentService.subscribeToDeploymentUpdates.bind(deploymentService);
+export const subscribeToSingleDeployment = deploymentService.subscribeToSingleDeployment.bind(deploymentService);
+export const getDeployment = deploymentService.getDeployment.bind(deploymentService);
+export const updateAgentDeploymentStatus = deploymentService.updateAgentDeploymentStatus.bind(deploymentService);
+export const updateDeploymentDocument = deploymentService.updateDeploymentDocument.bind(deploymentService);
+export const updateProgressStep = deploymentService.updateProgressStep.bind(deploymentService);
+export const getAgentServerStatus = deploymentService.getAgentServerStatus.bind(deploymentService);
+export const subscribeToAgentServerStatus = deploymentService.subscribeToAgentServerStatus.bind(deploymentService);
+
+// New schema helper methods
+export const getResourceConfiguration = deploymentService.getResourceConfiguration.bind(deploymentService);
+export const getDeploymentArtifacts = deploymentService.getDeploymentArtifacts.bind(deploymentService);
+export const getDeploymentMetrics = deploymentService.getDeploymentMetrics.bind(deploymentService);
+export const getVerificationResults = deploymentService.getVerificationResults.bind(deploymentService);
+export const getErrorDetails = deploymentService.getErrorDetails.bind(deploymentService);
+export const getRollbackInfo = deploymentService.getRollbackInfo.bind(deploymentService);
+export const canRollback = deploymentService.canRollback.bind(deploymentService);
+export const getEnvironmentInfo = deploymentService.getEnvironmentInfo.bind(deploymentService);
+export const getResourceSummary = deploymentService.getResourceSummary.bind(deploymentService);
+export const getTimingInfo = deploymentService.getTimingInfo.bind(deploymentService);
+export const getCostInfo = deploymentService.getCostInfo.bind(deploymentService);
+export const getServiceUrl = deploymentService.getServiceUrl.bind(deploymentService);
+export const getDockerImageInfo = deploymentService.getDockerImageInfo.bind(deploymentService);
+export const getSystemPromptInfo = deploymentService.getSystemPromptInfo.bind(deploymentService);

@@ -1,0 +1,506 @@
+/**
+ * Agent Publish Content Component
+ *
+ * Main publish page for managing agent publishing status and integrations
+ */
+import React, { useState, useEffect, useCallback } from 'react';
+import {
+  Box,
+  Typography,
+  Card,
+  CardContent,
+  Button,
+  CircularProgress,
+  Alert,
+  Grid,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogContentText,
+  DialogActions,
+  Paper,
+  alpha,
+  Stack,
+  IconButton,
+  Tooltip
+} from '@mui/material';
+import {
+  Publish as PublishIcon,
+  Unpublished as UnpublishedIcon,
+  CheckCircle as CheckCircleIcon,
+  Error as ErrorIcon,
+  Info as InfoIcon,
+  Refresh as RefreshIcon,
+  AccessTime as AccessTimeIcon
+} from '@mui/icons-material';
+
+// Import services
+import {
+  publishAgent,
+  unpublishAgent,
+  getPublishStatus,
+  subscribeToPublishStatus,
+  validatePublishPrerequisites,
+  checkDeploymentStatus
+} from '../../services/publishing/publishingService';
+import NotificationSystem, { createNotification } from '../shared/NotificationSystem';
+import EmptyState from '../shared/EmptyState';
+// import { doc, getDoc } from 'firebase/firestore'; // REMOVED: Firebase/Firestore
+import { db } from '../../utils/firebase';
+import { Collections } from '../../constants/collections';
+
+// FIRESTORE STUBS - These functions are stubbed because Firestore is disabled
+const collection = (...args) => { console.warn('Firestore disabled: collection() called'); return null; };
+const doc = (...args) => { console.warn('Firestore disabled: doc() called'); return null; };
+const getDoc = async (...args) => { console.warn('Firestore disabled: getDoc() called'); return { exists: () => false, data: () => ({}) }; };
+const getDocs = async (...args) => { console.warn('Firestore disabled: getDocs() called'); return { docs: [], size: 0, forEach: () => {} }; };
+const query = (...args) => { console.warn('Firestore disabled: query() called'); return null; };
+const where = (...args) => { console.warn('Firestore disabled: where() called'); return null; };
+const orderBy = (...args) => { console.warn('Firestore disabled: orderBy() called'); return null; };
+const limit = (...args) => { console.warn('Firestore disabled: limit() called'); return null; };
+const onSnapshot = (...args) => { console.warn('Firestore disabled: onSnapshot() called'); const callback = args.find(a => typeof a === 'function'); if (callback) setTimeout(() => callback({ docs: [], size: 0, forEach: () => {} }), 0); return () => {}; };
+
+
+const AgentPublishContent = ({ agentId }) => {
+  // State
+  const [loading, setLoading] = useState(true);
+  const [publishStatus, setPublishStatus] = useState(null);
+  const [deploymentStatus, setDeploymentStatus] = useState(null);
+  const [agentData, setAgentData] = useState(null);
+  const [notification, setNotification] = useState(null);
+  const [confirmDialog, setConfirmDialog] = useState({ open: false, action: null });
+  const [actionLoading, setActionLoading] = useState(false);
+
+  const loadData = useCallback(async () => {
+    try {
+      setLoading(true);
+
+      // Load agent data to check development_stage
+      const agentDoc = await getDoc(doc(db, Collections.AGENTS, agentId));
+      if (agentDoc.exists()) {
+        setAgentData(agentDoc.data());
+      }
+
+      // Load publish status
+      const statusResult = await getPublishStatus(agentId);
+      if (statusResult.success) {
+        setPublishStatus(statusResult.data);
+      }
+
+      // Load deployment status
+      const deploymentExists = await checkDeploymentStatus(agentId);
+      setDeploymentStatus(deploymentExists);
+    } catch (error) {
+      console.error('Error loading publish data:', error);
+      setNotification(createNotification('error', 'Failed to load publish data'));
+    } finally {
+      setLoading(false);
+    }
+  }, [agentId]);
+
+  const refreshPublishStatus = useCallback(async () => {
+    try {
+      const statusResult = await getPublishStatus(agentId);
+      if (statusResult.success) {
+        setPublishStatus(statusResult.data);
+      }
+    } catch (error) {
+      console.error('Error refreshing publish status:', error);
+    }
+  }, [agentId]);
+
+  // Auto-refresh runtime every minute for published agents
+  useEffect(() => {
+    if (!agentId) return;
+
+    let interval;
+    if (publishStatus?.published) {
+      interval = setInterval(() => {
+        refreshPublishStatus();
+      }, 60000); // Refresh every minute
+    }
+
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [agentId, publishStatus?.published, refreshPublishStatus]);
+
+  // Load initial data
+  useEffect(() => {
+    if (!agentId) {
+      setLoading(false);
+      return;
+    }
+
+    loadData();
+
+    // Subscribe to publish status changes
+    const unsubscribe = subscribeToPublishStatus(agentId, (status) => {
+      if (status.success) {
+        setPublishStatus(status.data);
+      }
+    });
+
+    return () => {
+      if (unsubscribe) unsubscribe();
+    };
+  }, [agentId, loadData]);
+
+  const handlePublish = async () => {
+    try {
+      setActionLoading(true);
+
+      // Validate prerequisites
+      const validation = await validatePublishPrerequisites(agentId);
+      if (!validation.valid) {
+        setNotification(createNotification('error', validation.error));
+        setActionLoading(false);
+        return;
+      }
+
+      // Publish agent
+      const result = await publishAgent(agentId);
+      if (result.success) {
+        setNotification(createNotification('success', 'Agent published successfully'));
+        await loadData();
+      } else {
+        setNotification(createNotification('error', result.message || 'Failed to publish agent'));
+      }
+    } catch (error) {
+      console.error('Error publishing agent:', error);
+      setNotification(createNotification('error', 'Failed to publish agent'));
+    } finally {
+      setActionLoading(false);
+      setConfirmDialog({ open: false, action: null });
+    }
+  };
+
+  const handleUnpublish = async () => {
+    try {
+      setActionLoading(true);
+
+      const result = await unpublishAgent(agentId);
+      if (result.success) {
+        setNotification(createNotification('success', 'Agent unpublished successfully'));
+        await loadData();
+      } else {
+        setNotification(createNotification('error', result.message || 'Failed to unpublish agent'));
+      }
+    } catch (error) {
+      console.error('Error unpublishing agent:', error);
+      setNotification(createNotification('error', 'Failed to unpublish agent'));
+    } finally {
+      setActionLoading(false);
+      setConfirmDialog({ open: false, action: null });
+    }
+  };
+
+  const handleOpenConfirmDialog = (action) => {
+    setConfirmDialog({ open: true, action });
+  };
+
+  const handleCloseConfirmDialog = () => {
+    setConfirmDialog({ open: false, action: null });
+  };
+
+  const handleConfirmAction = () => {
+    if (confirmDialog.action === 'publish') {
+      handlePublish();
+    } else if (confirmDialog.action === 'unpublish') {
+      handleUnpublish();
+    }
+  };
+
+  // Helper functions for publish validation
+  const canPublish = () => {
+    if (!agentData) return false;
+    const stage = agentData.development_stage;
+    return stage === 'deployed' || stage === 'published';
+  };
+
+  const getPublishDisabledReason = () => {
+    if (!agentData) return 'Loading agent data...';
+
+    const stage = agentData.development_stage;
+
+    if (!deploymentStatus) {
+      return 'Agent must be deployed before publishing';
+    }
+
+    switch (stage) {
+      case 'draft':
+        return 'Agent is in draft stage. Deploy the agent first.';
+      case 'development':
+        return 'Agent is in development. Deploy the agent first.';
+      case 'testing':
+        return 'Agent is in testing stage. Deploy the agent first.';
+      case 'paused':
+        return 'Agent is paused. Resume and deploy the agent first.';
+      case 'deployed':
+      case 'published':
+        return null; // Can publish
+      default:
+        return `Agent stage is '${stage || 'unknown'}'. Deploy the agent first.`;
+    }
+  };
+
+  const isPublishDisabled = () => {
+    return !canPublish() || !deploymentStatus || actionLoading;
+  };
+
+  // Show no agent selected state
+  if (!agentId) {
+    return (
+      <EmptyState
+        icon={PublishIcon}
+        title="No Agent Selected"
+        subtitle="Please select an agent from the sidebar to manage publishing."
+        useCard={true}
+      />
+    );
+  }
+
+  // Loading state
+  if (loading) {
+    return (
+      <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '400px' }}>
+        <CircularProgress />
+      </Box>
+    );
+  }
+
+  return (
+    <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+      {/* Header */}
+      <Box sx={{
+        px: 2.5,
+        py: 1.5,
+        borderBottom: 1,
+        borderColor: 'divider',
+        bgcolor: 'background.paper'
+      }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <Box>
+            <Typography variant="subtitle1" sx={{ fontWeight: 700, fontSize: '0.9375rem', mb: 0.25, letterSpacing: '-0.01em' }}>
+              Agent Publishing
+            </Typography>
+            <Typography variant="caption" sx={{ fontSize: '0.75rem', color: 'text.secondary', fontWeight: 400 }}>
+              Publish your agent and manage integrations across multiple channels
+            </Typography>
+          </Box>
+          <Tooltip title="Refresh status">
+            <IconButton onClick={refreshPublishStatus} size="small">
+              <RefreshIcon sx={{ fontSize: 18 }} />
+            </IconButton>
+          </Tooltip>
+        </Box>
+      </Box>
+
+      {/* Main Content */}
+      <Box sx={{ flex: 1, overflow: 'auto', p: 2.5 }}>
+        {/* Deployment/Stage Warning */}
+        {!canPublish() && (
+          <Alert
+            severity="warning"
+            sx={{ mb: 2, py: 0.75 }}
+            icon={<ErrorIcon />}
+          >
+            <Typography variant="body2" sx={{ fontSize: '0.8125rem', fontWeight: 500 }}>
+              <strong style={{ fontWeight: 600 }}>Cannot Publish:</strong> {getPublishDisabledReason()}
+            </Typography>
+          </Alert>
+        )}
+
+        {/* Publish Status Section */}
+        <Card sx={{ mb: 2 }}>
+          <CardContent sx={{ p: 2.5, '&:last-child': { pb: 2.5 } }}>
+            <Grid container spacing={2.5}>
+              {/* Status Column */}
+              <Grid item xs={12} md={6}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 2 }}>
+                  {publishStatus?.published ? (
+                    <CheckCircleIcon sx={{ fontSize: 36, color: 'success.main' }} />
+                  ) : (
+                    <UnpublishedIcon sx={{ fontSize: 36, color: 'text.disabled' }} />
+                  )}
+                  <Box>
+                    <Typography variant="h6" sx={{ fontWeight: 700, fontSize: '1.125rem', mb: 0.25, letterSpacing: '-0.01em' }}>
+                      {publishStatus?.published ? 'Published' : 'Not Published'}
+                    </Typography>
+                    <Typography variant="body2" sx={{ fontSize: '0.8125rem', color: 'text.secondary', fontWeight: 400 }}>
+                      {publishStatus?.published
+                        ? 'Agent is live and accepting requests'
+                        : 'Publish to make agent available'}
+                    </Typography>
+                  </Box>
+                </Box>
+
+                {/* Publish/Unpublish Button */}
+                <Tooltip
+                  title={isPublishDisabled() && !publishStatus?.published ? getPublishDisabledReason() : ''}
+                  placement="top"
+                >
+                  <span>
+                    <Button
+                      variant="contained"
+                      size="medium"
+                      fullWidth
+                      startIcon={publishStatus?.published ? <UnpublishedIcon sx={{ fontSize: 18 }} /> : <PublishIcon sx={{ fontSize: 18 }} />}
+                      onClick={() => handleOpenConfirmDialog(publishStatus?.published ? 'unpublish' : 'publish')}
+                      disabled={isPublishDisabled()}
+                      sx={{
+                        py: 1,
+                        fontSize: '0.875rem',
+                        fontWeight: 600,
+                        textTransform: 'none',
+                        bgcolor: publishStatus?.published ? 'error.main' : 'success.main',
+                        '&:hover': {
+                          bgcolor: publishStatus?.published ? 'error.dark' : 'success.dark'
+                        }
+                      }}
+                    >
+                      {actionLoading ? (
+                        <CircularProgress size={20} color="inherit" />
+                      ) : publishStatus?.published ? (
+                        'Unpublish Agent'
+                      ) : (
+                        'Publish Agent'
+                      )}
+                    </Button>
+                  </span>
+                </Tooltip>
+              </Grid>
+
+              {/* Runtime Stats Column */}
+              <Grid item xs={12} md={6}>
+                <Paper
+                  sx={{
+                    p: 2,
+                    bgcolor: alpha('#4caf50', 0.04),
+                    border: `1px solid ${alpha('#4caf50', 0.15)}`,
+                    height: '100%'
+                  }}
+                >
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.5 }}>
+                    <AccessTimeIcon sx={{ color: 'success.main', fontSize: 20 }} />
+                    <Typography variant="subtitle2" sx={{ fontWeight: 700, fontSize: '0.875rem', letterSpacing: '-0.01em' }}>
+                      Runtime Statistics
+                    </Typography>
+                  </Box>
+
+                  <Stack spacing={1.5}>
+                    <Box>
+                      <Typography variant="caption" sx={{ fontSize: '0.6875rem', color: 'text.secondary', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                        Total Runtime
+                      </Typography>
+                      <Typography variant="h6" sx={{ fontWeight: 700, fontSize: '1.25rem', color: 'success.main', letterSpacing: '-0.01em', mt: 0.25 }}>
+                        {publishStatus?.total_runtime_formatted || '0 hours'}
+                      </Typography>
+                    </Box>
+
+                    {publishStatus?.published && (
+                      <Box>
+                        <Typography variant="caption" sx={{ fontSize: '0.6875rem', color: 'text.secondary', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                          Current Session
+                        </Typography>
+                        <Typography variant="body2" sx={{ fontWeight: 600, fontSize: '0.9375rem', mt: 0.25 }}>
+                          {publishStatus?.current_session_formatted || '0 hours'}
+                        </Typography>
+                      </Box>
+                    )}
+                  </Stack>
+                </Paper>
+              </Grid>
+            </Grid>
+          </CardContent>
+        </Card>
+
+        {/* Info Section */}
+        <Card sx={{ bgcolor: alpha('#2196f3', 0.04), border: `1px solid ${alpha('#2196f3', 0.12)}` }}>
+          <CardContent sx={{ p: 2, '&:last-child': { pb: 2 } }}>
+            <Box sx={{ display: 'flex', gap: 1.5 }}>
+              <InfoIcon sx={{ color: 'info.main', fontSize: 20, mt: 0.25 }} />
+              <Box>
+                <Typography variant="subtitle2" sx={{ fontWeight: 700, fontSize: '0.8125rem', mb: 0.75, letterSpacing: '-0.01em' }}>
+                  About Publishing
+                </Typography>
+                <Typography variant="body2" sx={{ fontSize: '0.75rem', color: 'text.secondary', fontWeight: 400, lineHeight: 1.5, mb: 1 }}>
+                  Publishing your agent makes it available for integration across multiple channels.
+                  You can unpublish at any time to temporarily disable all integrations.
+                </Typography>
+                <Typography variant="body2" sx={{ fontSize: '0.75rem', color: 'text.secondary', fontWeight: 400, lineHeight: 1.5 }}>
+                  Runtime tracking helps you monitor how long your agent has been active and available to users.
+                </Typography>
+              </Box>
+            </Box>
+          </CardContent>
+        </Card>
+      </Box>
+
+      {/* Confirmation Dialog */}
+      <Dialog
+        open={confirmDialog.open}
+        onClose={handleCloseConfirmDialog}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle sx={{ pb: 1 }}>
+          <Typography variant="h6" sx={{ fontWeight: 700, fontSize: '1.125rem', letterSpacing: '-0.01em' }}>
+            {confirmDialog.action === 'publish' ? 'Publish Agent' : 'Unpublish Agent'}
+          </Typography>
+        </DialogTitle>
+        <DialogContent>
+          <DialogContentText sx={{ fontSize: '0.875rem', fontWeight: 400, color: 'text.secondary', lineHeight: 1.6 }}>
+            {confirmDialog.action === 'publish' ? (
+              <>
+                Are you sure you want to publish this agent? Once published, the agent will be available
+                for integration across all channels and will start accepting requests.
+              </>
+            ) : (
+              <>
+                Are you sure you want to unpublish this agent? This will temporarily disable all active
+                integrations. Runtime tracking will be paused but your total runtime will be preserved.
+              </>
+            )}
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button
+            onClick={handleCloseConfirmDialog}
+            disabled={actionLoading}
+            sx={{
+              fontSize: '0.875rem',
+              fontWeight: 600,
+              textTransform: 'none',
+              px: 2
+            }}
+          >
+            Cancel
+          </Button>
+          <Button
+            onClick={handleConfirmAction}
+            variant="contained"
+            disabled={actionLoading}
+            color={confirmDialog.action === 'publish' ? 'success' : 'error'}
+            sx={{
+              fontSize: '0.875rem',
+              fontWeight: 600,
+              textTransform: 'none',
+              px: 2.5
+            }}
+          >
+            {actionLoading ? <CircularProgress size={20} /> : 'Confirm'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Notification System */}
+      <NotificationSystem
+        notification={notification}
+        onClose={() => setNotification(null)}
+      />
+    </Box>
+  );
+};
+
+export default AgentPublishContent;

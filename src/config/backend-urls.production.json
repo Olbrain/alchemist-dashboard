@@ -1,0 +1,11 @@
+{
+  "AGENT_ENGINE_URL": "https://alchemist-agent-engine-851487020021.us-central1.run.app",
+  "KNOWLEDGE_VAULT_URL": "https://alchemist-knowledge-vault-851487020021.us-central1.run.app",
+  "BILLING_SERVICE_URL": "https://alchemist-billing-service-851487020021.us-central1.run.app",
+  "AGENT_LAUNCHER_URL": "https://us-central1-alchemist-e69bb.cloudfunctions.net/alchemist-agent-launcher",
+  "ANALYTICS_SERVICE_URL": "https://alchemist-analytics-851487020021.us-central1.run.app",
+  "AGENT_BRIDGE_URL": "https://alchemist-agent-bridge-851487020021.us-central1.run.app",
+  "AGENT_BUILDER_AI_SERVICE_URL": "https://alchemist-agent-builder-ai-851487020021.us-central1.run.app",
+  "AGENT_DASHBOARD_URL": "https://alchemist-agent-dashboard-851487020021.us-central1.run.app",
+  "TOOL_MANAGER_URL": "https://alchemist-tool-manager-851487020021.us-central1.run.app"
+}

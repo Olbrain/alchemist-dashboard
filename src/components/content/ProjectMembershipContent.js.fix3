@@ -1,0 +1,452 @@
+import React, { useState, useEffect } from 'react';
+import {
+  Box,
+  Paper,
+  Typography,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  Avatar,
+  Chip,
+  IconButton,
+  Menu,
+  MenuItem,
+  Alert,
+  CircularProgress,
+  Stack,
+  useTheme
+} from '@mui/material';
+import {
+  Add as AddIcon,
+  MoreVert as MoreVertIcon,
+  Email as EmailIcon,
+  Cancel as CancelIcon
+} from '@mui/icons-material';
+import { useAuth } from '../../utils/AuthContext';
+import {
+  getProjectMembers,
+  removeProjectMember,
+  getProject
+} from '../../services/projects/projectService';
+// import { getUserProfile } from '../../services/users/userProfileService'; // REMOVED: User profile service deleted
+// import InviteMemberToProjectDialog from '../shared/InviteMemberToProjectDialog'; // REMOVED: Component deleted
+
+/**
+ * ProjectMembershipContent Component
+ *
+ * Comprehensive project membership management interface
+ * Shows active members and pending invitations with full CRUD operations
+ */
+const ProjectMembershipContent = () => {
+  const theme = useTheme();
+  const { currentUser, currentProject } = useAuth();
+
+  const [activeMembers, setActiveMembers] = useState([]);
+  const [pendingInvitations, setPendingInvitations] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [success, setSuccess] = useState(null);
+
+  // Menu state
+  const [anchorEl, setAnchorEl] = useState(null);
+  const [selectedMember, setSelectedMember] = useState(null);
+
+  // REMOVED: Invite dialog - invitationService deleted
+  // const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
+
+  useEffect(() => {
+    if (currentProject) {
+      fetchMembers();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentProject]);
+
+  const fetchMembers = async () => {
+    try {
+      setLoading(true);
+      setError(null);
+
+      // Fetch members from subcollection
+      const membersData = await getProjectMembers(currentProject);
+
+      // Fetch project document to get owner info
+      const projectData = await getProject(currentProject);
+      const ownerId = projectData?.team_access?.owner_id;
+
+      let allMembers = [...membersData];
+
+      // If owner exists and is not already in members list, add them
+      if (ownerId) {
+        const ownerExists = membersData.some(m => m.user_id === ownerId);
+
+        if (!ownerExists) {
+          try {
+            // Fetch owner's user profile
+            // const ownerProfile = await getUserProfile(ownerId); // REMOVED: getUserProfile deleted
+            const ownerProfile = null; // TODO: Replace with appropriate profile fetching if needed
+
+            // Create owner member object
+            const ownerMember = {
+              id: ownerId,
+              user_id: ownerId,
+              project_id: currentProject,
+              role: 'owner',
+              status: 'active',
+              user_info: {
+                basic_info: {
+                  display_name: ownerProfile?.basic_info?.display_name || ownerProfile?.displayName || 'Project Owner',
+                  email: ownerProfile?.basic_info?.email || ownerProfile?.email || '',
+                  first_name: ownerProfile?.basic_info?.first_name || '',
+                  last_name: ownerProfile?.basic_info?.last_name || '',
+                  profile_picture_url: ownerProfile?.basic_info?.profile_picture_url || '',
+                  job_title: ownerProfile?.basic_info?.job_title || ''
+                }
+              },
+              membership_status: {
+                status: 'active',
+                invite_status: 'accepted'
+              }
+            };
+
+            // Add owner at the beginning of the list
+            allMembers = [ownerMember, ...membersData];
+          } catch (ownerErr) {
+            console.warn('Could not fetch owner profile:', ownerErr);
+            // Continue without owner profile data
+          }
+        }
+      }
+
+      // Separate active members and pending invitations
+      // Force owner role for the project owner
+      const active = allMembers
+        .filter(m => m.membership_status?.status === 'active' || m.status === 'active')
+        .map(m => {
+          // Override role to 'owner' if this is the project owner
+          if (ownerId && m.user_id === ownerId) {
+            return { ...m, role: 'owner' };
+          }
+          return m;
+        });
+      const pending = allMembers.filter(
+        m => m.membership_status?.invite_status === 'pending' || m.status === 'pending'
+      );
+
+      setActiveMembers(active);
+      setPendingInvitations(pending);
+    } catch (err) {
+      console.error('Error fetching members:', err);
+      setError('Failed to load project members. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleMenuOpen = (event, member) => {
+    setAnchorEl(event.currentTarget);
+    setSelectedMember(member);
+  };
+
+  const handleMenuClose = () => {
+    setAnchorEl(null);
+    setSelectedMember(null);
+  };
+
+  const handleRemoveMember = async () => {
+    if (!selectedMember) return;
+
+    try {
+      setError(null);
+      setSuccess(null);
+      handleMenuClose();
+
+      await removeProjectMember(currentProject, selectedMember.id);
+
+      setSuccess(`${selectedMember.user_info?.basic_info?.display_name || 'Member'} has been removed from the project.`);
+
+      // Refresh members list
+      await fetchMembers();
+    } catch (err) {
+      console.error('Error removing member:', err);
+      setError(err.message || 'Failed to remove member. Please try again.');
+    }
+  };
+
+  // REMOVED: handleInviteMember - invitationService deleted
+  // const handleInviteMember = () => {
+  //   setInviteDialogOpen(true);
+  // };
+
+  // REMOVED: handleInviteSuccess - invitationService deleted
+  // const handleInviteSuccess = async () => {
+  //   setInviteDialogOpen(false);
+  //   setSuccess('Invitation sent successfully!');
+  //   await fetchMembers();
+  // };
+
+  const getRoleColor = (role) => {
+    switch (role?.toLowerCase()) {
+      case 'owner':
+        return 'error';
+      case 'admin':
+        return 'warning';
+      case 'editor':
+        return 'primary';
+      case 'member':
+        return 'info';
+      case 'viewer':
+        return 'default';
+      default:
+        return 'default';
+    }
+  };
+
+  const getStatusColor = (status) => {
+    switch (status?.toLowerCase()) {
+      case 'active':
+        return 'success';
+      case 'pending':
+        return 'warning';
+      case 'suspended':
+        return 'error';
+      default:
+        return 'default';
+    }
+  };
+
+  if (!currentProject) {
+    return (
+      <Box sx={{ p: 4 }}>
+        <Alert severity="info">
+          Please select a project to manage its membership.
+        </Alert>
+      </Box>
+    );
+  }
+
+  if (loading) {
+    return (
+      <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 400 }}>
+        <CircularProgress />
+      </Box>
+    );
+  }
+
+  return (
+    <Box sx={{ p: 3 }}>
+      {/* Header */}
+      <Box sx={{ mb: 4, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <Box>
+          <Typography variant="h4" fontWeight={700} gutterBottom>
+            Membership
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            Manage team members and their access to this project
+          </Typography>
+        </Box>
+        {/* REMOVED: Invite Member button - invitationService deleted */}
+        {/* <Button
+          variant="contained"
+          startIcon={<AddIcon />}
+          onClick={handleInviteMember}
+          size="large"
+        >
+          Invite Member
+        </Button> */}
+      </Box>
+
+      {/* Alerts */}
+      {error && (
+        <Alert severity="error" sx={{ mb: 3 }} onClose={() => setError(null)}>
+          {error}
+        </Alert>
+      )}
+      {success && (
+        <Alert severity="success" sx={{ mb: 3 }} onClose={() => setSuccess(null)}>
+          {success}
+        </Alert>
+      )}
+
+      {/* Active Members Section */}
+      <Paper elevation={0} sx={{ mb: 4, border: `1px solid ${theme.palette.divider}` }}>
+        <Box sx={{ p: 3, borderBottom: `1px solid ${theme.palette.divider}` }}>
+          <Typography variant="h6" fontWeight={600}>
+            Active Members ({activeMembers.length})
+          </Typography>
+        </Box>
+
+        <TableContainer>
+          <Table>
+            <TableHead>
+              <TableRow>
+                <TableCell>Member</TableCell>
+                <TableCell>Email</TableCell>
+                <TableCell>Role</TableCell>
+                <TableCell>Status</TableCell>
+                <TableCell align="right">Actions</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {activeMembers.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={5} align="center" sx={{ py: 4 }}>
+                    <Typography color="text.secondary">No active members found</Typography>
+                  </TableCell>
+                </TableRow>
+              ) : (
+                activeMembers.map((member) => (
+                  <TableRow key={member.id} hover>
+                    <TableCell>
+                      <Stack direction="row" spacing={2} alignItems="center">
+                        <Avatar
+                          src={member.user_info?.basic_info?.profile_picture_url}
+                          alt={member.user_info?.basic_info?.display_name || member.name}
+                          sx={{ width: 40, height: 40 }}
+                        >
+                          {(member.user_info?.basic_info?.display_name || member.name || 'U').charAt(0).toUpperCase()}
+                        </Avatar>
+                        <Box>
+                          <Typography variant="body2" fontWeight={500}>
+                            {member.user_info?.basic_info?.display_name || member.name || 'Unknown User'}
+                          </Typography>
+                          {member.user_info?.basic_info?.job_title && (
+                            <Typography variant="caption" color="text.secondary">
+                              {member.user_info.basic_info.job_title}
+                            </Typography>
+                          )}
+                        </Box>
+                      </Stack>
+                    </TableCell>
+                    <TableCell>
+                      <Typography variant="body2">
+                        {member.user_info?.basic_info?.email || member.email || 'N/A'}
+                      </Typography>
+                    </TableCell>
+                    <TableCell>
+                      <Chip
+                        label={member.role?.toUpperCase() || 'MEMBER'}
+                        color={getRoleColor(member.role)}
+                        size="small"
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <Chip
+                        label={member.membership_status?.status?.toUpperCase() || member.status?.toUpperCase() || 'ACTIVE'}
+                        color={getStatusColor(member.membership_status?.status || member.status)}
+                        size="small"
+                        variant="outlined"
+                      />
+                    </TableCell>
+                    <TableCell align="right">
+                      {member.role !== 'owner' && member.user_id !== currentUser?.uid && (
+                        <IconButton
+                          size="small"
+                          onClick={(e) => handleMenuOpen(e, member)}
+                        >
+                          <MoreVertIcon />
+                        </IconButton>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))
+              )}
+            </TableBody>
+          </Table>
+        </TableContainer>
+      </Paper>
+
+      {/* Pending Invitations Section */}
+      {pendingInvitations.length > 0 && (
+        <Paper elevation={0} sx={{ border: `1px solid ${theme.palette.divider}` }}>
+          <Box sx={{ p: 3, borderBottom: `1px solid ${theme.palette.divider}` }}>
+            <Typography variant="h6" fontWeight={600}>
+              Pending Invitations ({pendingInvitations.length})
+            </Typography>
+          </Box>
+
+          <TableContainer>
+            <Table>
+              <TableHead>
+                <TableRow>
+                  <TableCell>Email</TableCell>
+                  <TableCell>Role</TableCell>
+                  <TableCell>Invited By</TableCell>
+                  <TableCell>Status</TableCell>
+                  <TableCell align="right">Actions</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {pendingInvitations.map((invitation) => (
+                  <TableRow key={invitation.id} hover>
+                    <TableCell>
+                      <Stack direction="row" spacing={1.5} alignItems="center">
+                        <EmailIcon sx={{ color: 'text.secondary', fontSize: 20 }} />
+                        <Typography variant="body2">
+                          {invitation.email || invitation.user_info?.basic_info?.email || 'N/A'}
+                        </Typography>
+                      </Stack>
+                    </TableCell>
+                    <TableCell>
+                      <Chip
+                        label={invitation.role?.toUpperCase() || 'MEMBER'}
+                        color={getRoleColor(invitation.role)}
+                        size="small"
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <Typography variant="body2" color="text.secondary">
+                        {invitation.added_by || 'N/A'}
+                      </Typography>
+                    </TableCell>
+                    <TableCell>
+                      <Chip
+                        label="PENDING"
+                        color="warning"
+                        size="small"
+                        variant="outlined"
+                      />
+                    </TableCell>
+                    <TableCell align="right">
+                      <IconButton
+                        size="small"
+                        onClick={(e) => handleMenuOpen(e, invitation)}
+                        color="error"
+                      >
+                        <CancelIcon />
+                      </IconButton>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        </Paper>
+      )}
+
+      {/* Action Menu */}
+      <Menu
+        anchorEl={anchorEl}
+        open={Boolean(anchorEl)}
+        onClose={handleMenuClose}
+      >
+        <MenuItem onClick={handleRemoveMember} sx={{ color: 'error.main' }}>
+          Remove from Project
+        </MenuItem>
+      </Menu>
+
+      {/* Invite Member Dialog */}
+      {/* <InviteMemberToProjectDialog
+        open={inviteDialogOpen}
+        onClose={() => setInviteDialogOpen(false)}
+        projectId={currentProject}
+        onSuccess={handleInviteSuccess}
+      /> */}
+      {/* REMOVED: InviteMemberToProjectDialog component deleted */}
+    </Box>
+  );
+};
+
+export default ProjectMembershipContent;

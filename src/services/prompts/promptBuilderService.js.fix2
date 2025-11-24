@@ -1,0 +1,457 @@
+/**
+ * Prompt Builder Service
+ *
+ * Handles all API operations for agent prompt sections
+ * Manages the 7 prompt sections: identity, objectives, expertise,
+ * constraints, personality, communication_guidelines, behavioral_rules
+ */
+import { db, Collections } from '../../utils/firebase';
+// import { doc, getDoc } from 'firebase/firestore'; // REMOVED: Firebase/Firestore
+import { getCurrentUser } from '../context';
+
+// FIRESTORE STUBS - These functions are stubbed because Firestore is disabled
+const collection = (...args) => { console.warn('Firestore disabled: collection() called'); return null; };
+const doc = (...args) => { console.warn('Firestore disabled: doc() called'); return null; };
+const getDoc = async (...args) => { console.warn('Firestore disabled: getDoc() called'); return { exists: () => false, data: () => ({}) }; };
+const getDocs = async (...args) => { console.warn('Firestore disabled: getDocs() called'); return { docs: [], size: 0, forEach: () => {} }; };
+const query = (...args) => { console.warn('Firestore disabled: query() called'); return null; };
+const where = (...args) => { console.warn('Firestore disabled: where() called'); return null; };
+const orderBy = (...args) => { console.warn('Firestore disabled: orderBy() called'); return null; };
+const limit = (...args) => { console.warn('Firestore disabled: limit() called'); return null; };
+const onSnapshot = (...args) => { console.warn('Firestore disabled: onSnapshot() called'); const callback = args.find(a => typeof a === 'function'); if (callback) setTimeout(() => callback({ docs: [], size: 0, forEach: () => {} }), 0); return () => {}; };
+
+
+// Define the 7 prompt sections
+export const PROMPT_SECTIONS = {
+  IDENTITY: 'identity',
+  OBJECTIVES: 'objectives',
+  EXPERTISE: 'expertise',
+  CONSTRAINTS: 'constraints',
+  PERSONALITY: 'personality',
+  COMMUNICATION_GUIDELINES: 'communication_guidelines',
+  BEHAVIORAL_RULES: 'behavioral_rules'
+};
+
+// Section metadata with guidance
+export const SECTION_METADATA = {
+  [PROMPT_SECTIONS.IDENTITY]: {
+    title: 'Identity',
+    description: 'Define who the agent is - its name, role, and fundamental character',
+    placeholder: 'Example: You are a helpful customer service assistant named Alex...',
+    minLength: 50,
+    recommendedLength: 200,
+    guidance: 'Describe the agent\'s core identity, role, and purpose. This sets the foundation for how the agent introduces itself and understands its function.'
+  },
+  [PROMPT_SECTIONS.OBJECTIVES]: {
+    title: 'Objectives',
+    description: 'What the agent aims to achieve in interactions',
+    placeholder: 'Example: Your primary objectives are to resolve customer issues quickly...',
+    minLength: 50,
+    recommendedLength: 200,
+    guidance: 'List the main goals and objectives the agent should work towards. Be specific about desired outcomes and success criteria.'
+  },
+  [PROMPT_SECTIONS.EXPERTISE]: {
+    title: 'Expertise',
+    description: 'Areas of specialization and knowledge domains',
+    placeholder: 'Example: You are an expert in e-commerce, payment processing, and order management...',
+    minLength: 50,
+    recommendedLength: 250,
+    guidance: 'Define the agent\'s areas of expertise and specialized knowledge. This helps the agent understand its domain of competence.'
+  },
+  [PROMPT_SECTIONS.CONSTRAINTS]: {
+    title: 'Constraints',
+    description: 'Limitations, boundaries, and rules to follow',
+    placeholder: 'Example: You cannot process refunds over $500 without supervisor approval...',
+    minLength: 50,
+    recommendedLength: 250,
+    guidance: 'Define clear boundaries and limitations. Include what the agent should NOT do, escalation triggers, and safety guidelines.'
+  },
+  [PROMPT_SECTIONS.PERSONALITY]: {
+    title: 'Personality',
+    description: 'Personality traits, tone, and interaction style',
+    placeholder: 'Example: You are friendly, empathetic, and professional. You use a warm but professional tone...',
+    minLength: 50,
+    recommendedLength: 200,
+    guidance: 'Describe the agent\'s personality traits, emotional tone, and interpersonal style. This shapes how the agent communicates.'
+  },
+  [PROMPT_SECTIONS.COMMUNICATION_GUIDELINES]: {
+    title: 'Communication Guidelines',
+    description: 'How to structure responses and communicate effectively',
+    placeholder: 'Example: Always start with a greeting, acknowledge the issue, provide clear steps...',
+    minLength: 50,
+    recommendedLength: 250,
+    guidance: 'Provide specific guidelines for structuring responses, formatting information, and maintaining conversation flow.'
+  },
+  [PROMPT_SECTIONS.BEHAVIORAL_RULES]: {
+    title: 'Behavioral Rules',
+    description: 'Specific behavioral rules and protocols to follow',
+    placeholder: 'Example: Always verify customer identity before discussing account details...',
+    minLength: 50,
+    recommendedLength: 250,
+    guidance: 'List specific behavioral rules, protocols, and procedures the agent must follow. Include compliance and safety rules.'
+  }
+};
+
+// Get all section names in order
+export const getAllSectionNames = () => {
+  return Object.values(PROMPT_SECTIONS);
+};
+
+/**
+ * Get a specific prompt section for an agent
+ */
+export const getPromptSection = async (agentId, sectionName) => {
+  try {
+    const currentUser = getCurrentUser();
+    if (!currentUser) {
+      throw new Error('User not authenticated');
+    }
+
+    // Get section document from Firestore
+    const sectionRef = doc(db, Collections.AGENTS, agentId, 'prompts', sectionName);
+    const sectionDoc = await getDoc(sectionRef);
+
+    if (!sectionDoc.exists()) {
+      return {
+        content: '',
+        completed: false,
+        updated_at: null,
+        completed_at: null
+      };
+    }
+
+    return sectionDoc.data();
+  } catch (error) {
+    console.error(`Error getting prompt section ${sectionName} for agent ${agentId}:`, error);
+    throw error;
+  }
+};
+
+/**
+ * Get all prompt sections for an agent
+ */
+export const getAllPromptSections = async (agentId) => {
+  try {
+    const currentUser = getCurrentUser();
+    if (!currentUser) {
+      throw new Error('User not authenticated');
+    }
+
+    const sections = {};
+    const sectionNames = getAllSectionNames();
+
+    // Fetch all sections in parallel
+    const promises = sectionNames.map(async (sectionName) => {
+      const sectionData = await getPromptSection(agentId, sectionName);
+      sections[sectionName] = sectionData;
+    });
+
+    await Promise.all(promises);
+
+    return sections;
+  } catch (error) {
+    console.error(`Error getting all prompt sections for agent ${agentId}:`, error);
+    throw error;
+  }
+};
+
+/**
+ * Update a single field in a prompt section (via backend API)
+ */
+export const updatePromptField = async (agentId, sectionName, fieldName, fieldValue) => {
+  try {
+    const currentUser = getCurrentUser();
+    if (!currentUser) {
+      throw new Error('User not authenticated');
+    }
+
+    // Validate section name
+    if (!Object.values(PROMPT_SECTIONS).includes(sectionName)) {
+      throw new Error(`Invalid section name: ${sectionName}`);
+    }
+
+    // Call backend API using agentBuilderApi
+    const { agentBuilderApi } = await import('../config/apiConfig');
+    await agentBuilderApi.put(
+      `/api/agents/${agentId}/prompts/${sectionName}/fields/${fieldName}`,
+      { value: fieldValue }
+    );
+
+    // Wait for Firestore sync (500ms delay pattern from create_agent)
+    await new Promise(resolve => setTimeout(resolve, 500));
+
+    return {
+      success: true,
+      section: sectionName,
+      field: fieldName
+    };
+  } catch (error) {
+    console.error(`Error updating prompt field ${sectionName}.${fieldName} for agent ${agentId}:`, error);
+    const errorMessage = error.response?.data?.detail ||
+                         error.response?.data?.message ||
+                         error.message;
+    throw new Error(errorMessage);
+  }
+};
+
+/**
+ * Mark a section as complete (via backend API)
+ */
+export const markSectionComplete = async (agentId, sectionName, completed = true) => {
+  try {
+    const currentUser = getCurrentUser();
+    if (!currentUser) {
+      throw new Error('User not authenticated');
+    }
+
+    // Call backend API using agentBuilderApi
+    const { agentBuilderApi } = await import('../config/apiConfig');
+    await agentBuilderApi.post(
+      `/api/agents/${agentId}/prompts/${sectionName}/complete`,
+      { completed }
+    );
+
+    // Wait for Firestore sync (500ms delay pattern from create_agent)
+    await new Promise(resolve => setTimeout(resolve, 500));
+
+    return { success: true, section: sectionName, completed };
+  } catch (error) {
+    console.error(`Error marking section ${sectionName} complete for agent ${agentId}:`, error);
+    const errorMessage = error.response?.data?.detail ||
+                         error.response?.data?.message ||
+                         error.message;
+    throw new Error(errorMessage);
+  }
+};
+
+/**
+ * Get prompt progress for an agent
+ */
+export const getPromptProgress = async (agentId) => {
+  try {
+    const currentUser = getCurrentUser();
+    if (!currentUser) {
+      throw new Error('User not authenticated');
+    }
+
+    const allSections = await getAllPromptSections(agentId);
+    const sectionNames = getAllSectionNames();
+
+    const completedSections = [];
+    const pendingSections = [];
+    let totalCharacters = 0;
+
+    sectionNames.forEach(sectionName => {
+      const section = allSections[sectionName];
+
+      if (section.completed) {
+        completedSections.push(sectionName);
+      } else {
+        pendingSections.push(sectionName);
+      }
+
+      if (section.content) {
+        totalCharacters += section.content.length;
+      }
+    });
+
+    const completionPercentage = Math.round((completedSections.length / sectionNames.length) * 100);
+    const allSectionsComplete = completedSections.length === sectionNames.length;
+
+    return {
+      total_sections: sectionNames.length,
+      completed_sections: completedSections,
+      pending_sections: pendingSections,
+      completion_percentage: completionPercentage,
+      all_sections_complete: allSectionsComplete,
+      total_characters: totalCharacters,
+      estimated_tokens: Math.ceil(totalCharacters / 4) // Rough token estimate
+    };
+  } catch (error) {
+    console.error(`Error getting prompt progress for agent ${agentId}:`, error);
+    throw error;
+  }
+};
+
+/**
+ * Export all prompt sections as a single combined prompt
+ */
+export const exportCombinedPrompt = async (agentId) => {
+  try {
+    const sections = await getAllPromptSections(agentId);
+    const sectionNames = getAllSectionNames();
+
+    let combinedPrompt = '';
+
+    sectionNames.forEach(sectionName => {
+      const section = sections[sectionName];
+      const metadata = SECTION_METADATA[sectionName];
+
+      if (section.content && section.content.trim()) {
+        combinedPrompt += `## ${metadata.title}\n\n`;
+        combinedPrompt += `${section.content.trim()}\n\n`;
+      }
+    });
+
+    return combinedPrompt.trim();
+  } catch (error) {
+    console.error(`Error exporting combined prompt for agent ${agentId}:`, error);
+    throw error;
+  }
+};
+
+/**
+ * Import prompt sections from a combined prompt text
+ * Attempts to parse sections by headers
+ */
+export const importCombinedPrompt = async (agentId, combinedText) => {
+  try {
+    const currentUser = getCurrentUser();
+    if (!currentUser) {
+      throw new Error('User not authenticated');
+    }
+
+    // Split by section headers
+    const sections = {};
+    const sectionNames = getAllSectionNames();
+
+    sectionNames.forEach(sectionName => {
+      const metadata = SECTION_METADATA[sectionName];
+      const headerPattern = new RegExp(`##\\s*${metadata.title}\\s*\\n+([\\s\\S]*?)(?=##|$)`, 'i');
+      const match = combinedText.match(headerPattern);
+
+      if (match) {
+        sections[sectionName] = match[1].trim();
+      }
+    });
+
+    // Update all sections by parsing and updating each field
+    const promises = Object.entries(sections).map(async ([sectionName, content]) => {
+      // Try to parse content as JSON to extract fields
+      let contentObj = {};
+      try {
+        contentObj = JSON.parse(content);
+      } catch (e) {
+        // If not JSON, treat as single 'content' field
+        contentObj = { content };
+      }
+
+      // Update each field separately
+      const fieldPromises = Object.entries(contentObj).map(([fieldName, fieldValue]) => {
+        return updatePromptField(agentId, sectionName, fieldName, fieldValue);
+      });
+
+      return Promise.all(fieldPromises);
+    });
+
+    await Promise.all(promises);
+
+    return {
+      success: true,
+      imported_sections: Object.keys(sections).length,
+      sections_imported: Object.keys(sections)
+    };
+  } catch (error) {
+    console.error(`Error importing combined prompt for agent ${agentId}:`, error);
+    throw error;
+  }
+};
+
+/**
+ * Delete a prompt section (clear content) via backend API
+ */
+export const clearPromptSection = async (agentId, sectionName) => {
+  try {
+    const currentUser = getCurrentUser();
+    if (!currentUser) {
+      throw new Error('User not authenticated');
+    }
+
+    // Use backend API to clear the content field
+    const { agentBuilderApi } = await import('../config/apiConfig');
+    await agentBuilderApi.put(
+      `/api/agents/${agentId}/prompts/${sectionName}/fields/content`,
+      { value: '' }
+    );
+
+    console.log(`Cleared prompt section ${sectionName} for agent ${agentId} via backend API`);
+    return { success: true, section: sectionName };
+  } catch (error) {
+    console.error(`Error clearing prompt section ${sectionName} for agent ${agentId}:`, error);
+    const errorMessage = error.response?.data?.detail || error.message;
+    throw new Error(errorMessage);
+  }
+};
+
+/**
+ * Validate section content (basic validation)
+ *
+ * For AI-powered validation, use validatePromptSection from promptValidationService
+ */
+export const validateSectionContent = (sectionName, content) => {
+  const metadata = SECTION_METADATA[sectionName];
+
+  if (!metadata) {
+    return { valid: false, error: 'Invalid section name' };
+  }
+
+  const contentLength = content ? content.trim().length : 0;
+
+  if (contentLength === 0) {
+    return { valid: true, warning: 'Section is empty', canComplete: false };
+  }
+
+  if (contentLength < metadata.minLength) {
+    return {
+      valid: true,
+      warning: `Content is shorter than recommended minimum of ${metadata.minLength} characters`,
+      canComplete: false,
+      currentLength: contentLength,
+      minLength: metadata.minLength,
+      recommendedLength: metadata.recommendedLength
+    };
+  }
+
+  return {
+    valid: true,
+    canComplete: true,
+    currentLength: contentLength,
+    minLength: metadata.minLength,
+    recommendedLength: metadata.recommendedLength
+  };
+};
+
+/**
+ * Check if section content is structured data (JSON) or prose
+ */
+export const isStructuredData = (content) => {
+  if (!content || typeof content !== 'string') {
+    return false;
+  }
+
+  const trimmed = content.trim();
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
+    return false;
+  }
+
+  try {
+    JSON.parse(trimmed);
+    return true;
+  } catch (e) {
+    return false;
+  }
+};
+
+/**
+ * Parse section content - returns object if structured data, or string if prose
+ */
+export const parseSectionContent = (content) => {
+  if (isStructuredData(content)) {
+    try {
+      return JSON.parse(content);
+    } catch (e) {
+      return content;
+    }
+  }
+  return content;
+};

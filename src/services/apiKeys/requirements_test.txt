@@ -1,0 +1,15 @@
+# Requirements for API Key Testing Script
+# Install with: pip install -r requirements_test.txt
+
+# HTTP requests library
+requests>=2.31.0
+
+# Colored terminal output
+colorama>=0.4.6
+
+# Command line interface
+fire>=0.5.0
+
+# Optional: For advanced testing features
+# asyncio>=3.4.3  # Built into Python 3.7+
+# concurrent.futures  # Built into Python 3.2+

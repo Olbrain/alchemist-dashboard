@@ -1,0 +1,19 @@
+/**
+ * WhatsApp Integration Manager - Redirects to Meta Integration
+ * 
+ * This component redirects users to the new Meta WhatsApp Integration
+ */
+import React, { useEffect } from 'react';
+import MetaWhatsAppIntegrationManager from './MetaWhatsAppIntegrationManager';
+
+const WhatsAppIntegrationManager = (props) => {
+  useEffect(() => {
+    // Log the redirect for debugging
+    console.log('WhatsAppIntegrationManager: Redirecting to Meta WhatsApp Integration');
+  }, []);
+
+  // Simply render the Meta WhatsApp Integration Manager
+  return <MetaWhatsAppIntegrationManager {...props} />;
+};
+
+export default WhatsAppIntegrationManager;

@@ -1,0 +1,5 @@
+
+> project-dashboard-embed@0.1.0 build:prod
+> REACT_APP_ENV=production craco build
+
+Creating an optimized production build...
