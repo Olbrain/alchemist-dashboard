@@ -1,6 +1,6 @@
 {
   "name": "@olbrain/alchemist-dashboard",
-  "version": "0.1.5",
+  "version": "0.1.7",
   "description": "Embeddable AI Agent Dashboard with Module Federation support",
   "keywords": [
     "react",
@@ -15,9 +15,9 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/olbrain/alchemist-dashboard"
+    "url": "https://github.com/Olbrain/alchemist-dashboard"
   },
-  "homepage": "https://github.com/olbrain/alchemist-dashboard#readme",
+  "homepage": "https://github.com/Olbrain/alchemist-dashboard#readme",
   "private": false,
   "main": "build/remoteEntry.js",
   "files": [
