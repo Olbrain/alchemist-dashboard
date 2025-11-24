@@ -551,24 +551,29 @@ class ApiKeyService {
    */
   async findOrCreateTestApiKey(agentId, userId) {
     try {
-      // First, check if test API key exists in agent_servers/[agent_id]/testing
-      const agentServerRef = doc(db, 'agent_servers', agentId);
-      const agentServerDoc = await getDoc(agentServerRef);
+      // Check if test API key exists via backend API (agent_servers collection)
+      try {
+        const { getDataAccess } = require('../data/DataAccessFactory');
+        const dataAccess = getDataAccess();
+        const serverData = await dataAccess.getAgentServer(agentId);
 
-      if (agentServerDoc.exists()) {
-        const serverData = agentServerDoc.data();
-        const testing = serverData.testing;
+        if (serverData && serverData.testing) {
+          const testing = serverData.testing;
 
-        // If test API key exists and is valid, return it
-        if (testing && testing.api_key && testing.status === 'active') {
-          console.log('Found existing test API key in agent_servers:', testing.api_key_id);
-          return {
-            success: true,
-            keyId: testing.api_key_id,
-            apiKey: testing.api_key,
-            exists: true
-          };
+          // If test API key exists and is valid, return it
+          if (testing.api_key && testing.status === 'active') {
+            console.log('Found existing test API key in agent_servers:', testing.api_key_id);
+            return {
+              success: true,
+              keyId: testing.api_key_id,
+              apiKey: testing.api_key,
+              exists: true
+            };
+          }
         }
+      } catch (error) {
+        // Agent server not found or no testing data - proceed to create
+        console.log('No existing test API key found, will create new one');
       }
 
       console.log('Creating new test API key for agent:', agentId);
@@ -642,18 +647,28 @@ class ApiKeyService {
   async getOrCreateTestApiKeyInSession(agentId, userId) {
     try {
       const testSessionId = `test_${agentId}`;
-      const sessionDocRef = doc(db, 'agent_sessions', testSessionId);
-      const docSnap = await getDoc(sessionDocRef);
 
-      if (docSnap.exists()) {
-        const data = docSnap.data();
-        const keyAge = Date.now() - (data.test_api_key_created_at?.toMillis() || 0);
+      // Check if test API key exists in session via backend API
+      try {
+        const { getDataAccess } = require('../data/DataAccessFactory');
+        const dataAccess = getDataAccess();
+        const sessionData = await dataAccess.getTestingSessionDetails(testSessionId);
 
-        // Check if key exists and is still valid (< 24 hours)
-        if (data.test_api_key && keyAge < 24 * 60 * 60 * 1000) {
-          console.log('Using existing valid test API key from session');
-          return { success: true, apiKey: data.test_api_key };
+        if (sessionData && sessionData.test_api_key) {
+          const keyCreatedAt = sessionData.test_api_key_created_at
+            ? new Date(sessionData.test_api_key_created_at).getTime()
+            : 0;
+          const keyAge = Date.now() - keyCreatedAt;
+
+          // Check if key exists and is still valid (< 24 hours)
+          if (keyAge < 24 * 60 * 60 * 1000) {
+            console.log('Using existing valid test API key from session');
+            return { success: true, apiKey: sessionData.test_api_key };
+          }
         }
+      } catch (error) {
+        // Session not found or no test key - proceed to create
+        console.log('No existing test API key in session, will create new one');
       }
 
       // Key doesn't exist or is expired - find or create 'agent_testing' key (include system keys)

@@ -34,18 +34,12 @@ import {
   getSessionMessagesFromFirestore,
   subscribeToSessionMessages
 } from '../../services/conversations/conversationService';
-import { db } from '../../utils/firebase';
-// import { doc, getDoc, onSnapshot } from 'firebase/firestore'; // REMOVED: Firebase/Firestore
+import { getDataAccess } from '../../services/data/DataAccessFactory';
 import apiKeyService from '../../services/apiKeys/apiKeyService';
 import EmptyState from '../shared/EmptyState';
 import { getProjectOrganizationId } from '../../utils/projectHelpers';
 import { checkDeploymentStatus } from '../../services/publishing/publishingService';
 import AgentTestingSidebar from '../AgentEditor/AgentTesting/AgentTestingSidebar';
-
-// FIRESTORE STUBS - These functions are stubbed because Firestore is disabled
-const doc = (...args) => { console.warn('Firestore disabled: doc() called'); return null; };
-const getDoc = async (...args) => { console.warn('Firestore disabled: getDoc() called'); return { exists: () => false, data: () => ({}) }; };
-const onSnapshot = (...args) => { console.warn('Firestore disabled: onSnapshot() called'); const callback = args.find(a => typeof a === 'function'); if (callback) setTimeout(() => callback({ docs: [], size: 0, forEach: () => {} }), 0); return () => {}; };
 
 
 const AgentTestingContent = ({ agentId }) => {
@@ -103,29 +97,20 @@ const AgentTestingContent = ({ agentId }) => {
         setIsDeployed(deploymentExists);
         console.log('🧪 [AgentTestingContent] Deployment status:', deploymentExists);
 
-        // Load agent data
-        const agentDoc = await getDoc(doc(db, 'agents', agentId));
-        if (agentDoc.exists()) {
-          const agentData = agentDoc.data();
-          setSelectedAgent({
-            id: agentId,
-            name: agentData.name || 'Unnamed Agent',
-            description: agentData.description || '',
-            agent_type: agentData.agent_type || 'general',
-            model: agentData.model || 'unknown',
-            project_id: agentData.project_id,
-            created_at: agentData.created_at
-          });
+        // Load agent data - use minimal stub for embed mode
+        // In embed mode, agent data may not be fully available via API
+        setSelectedAgent({
+          id: agentId,
+          name: 'Agent', // Minimal name since full agent API may not exist
+          description: '',
+          agent_type: 'general',
+          model: 'unknown'
+        });
 
-          // Get organizationId for loading sessions later
-          if (agentData.project_id) {
-            const orgId = await getProjectOrganizationId(agentData.project_id);
-            setOrganizationId(orgId);
-          }
-        } else {
-          console.error('🧪 [AgentTestingContent] Agent document not found:', agentId);
-          setSelectedAgent(null);
-        }
+        // For embed mode, organization ID should be available from currentUser or API key
+        // TODO: Get organization ID from backend API if needed
+        const orgId = currentUser?.uid || 'default-org';
+        setOrganizationId(orgId);
       } catch (error) {
         console.error('🧪 [AgentTestingContent] Error loading agent/deployment status:', error);
         setIsDeployed(false);
@@ -384,14 +369,12 @@ const AgentTestingContent = ({ agentId }) => {
 
   const getAgentEndpoint = async (agentId) => {
     try {
-      const agentServerDoc = doc(db, 'agent_servers', agentId);
-      const docSnapshot = await getDoc(agentServerDoc);
+      const dataAccess = getDataAccess();
+      const serverData = await dataAccess.getAgentServer(agentId);
 
-      if (!docSnapshot.exists()) {
+      if (!serverData) {
         throw new Error('Agent server not found');
       }
-
-      const serverData = docSnapshot.data();
 
       if (!serverData.service_url || serverData.status !== 'active') {
         throw new Error(`Agent server not active`);
@@ -467,22 +450,10 @@ const AgentTestingContent = ({ agentId }) => {
 
       subscriptionRefs.current.message = messageUnsubscribe;
 
-      // Set up session stats subscription
-      const sessionDoc = doc(db, 'agent_sessions', sessionId);
-      const statsUnsubscribe = onSnapshot(sessionDoc, (docSnapshot) => {
-        if (docSnapshot.exists()) {
-          const sessionData = docSnapshot.data();
-
-          const stats = {
-            message_count: sessionData.message_count || 0,
-            total_tokens: sessionData.total_tokens || 0,
-            prompt_tokens: sessionData.prompt_tokens || 0,
-            completion_tokens: sessionData.completion_tokens || 0,
-            cost: sessionData.cost || 0
-          };
-
-          setSessionStats(stats);
-        }
+      // Set up session stats subscription using API polling
+      const dataAccess = getDataAccess();
+      const statsUnsubscribe = dataAccess.subscribeToTestingSessionStats(sessionId, (stats) => {
+        setSessionStats(stats);
       });
 
       subscriptionRefs.current.stats = statsUnsubscribe;

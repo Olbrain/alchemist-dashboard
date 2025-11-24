@@ -28,8 +28,7 @@ import { useAuth } from '../../../utils/AuthContext';
 import {
   subscribeToSessionMessages
 } from '../../../services/conversations/conversationService';
-import { db } from '../../../utils/firebase';
-// import { doc, getDoc, onSnapshot } from 'firebase/firestore'; // REMOVED: Firebase/Firestore
+import { getDataAccess } from '../../../services/data/DataAccessFactory';
 import apiKeyService from '../../../services/apiKeys/apiKeyService';
 
 const EmbeddedAgentTesting = ({
@@ -116,14 +115,12 @@ const EmbeddedAgentTesting = ({
   // Get agent endpoint
   const getAgentEndpoint = useCallback(async (agentId) => {
     try {
-      const agentServerDoc = doc(db, 'agent_servers', agentId);
-      const docSnapshot = await getDoc(agentServerDoc);
+      const dataAccess = getDataAccess();
+      const serverData = await dataAccess.getAgentServer(agentId);
 
-      if (!docSnapshot.exists()) {
+      if (!serverData) {
         throw new Error('Agent server not found - agent may not be deployed');
       }
-
-      const serverData = docSnapshot.data();
 
       if (!serverData.service_url || serverData.status !== 'active') {
         throw new Error(`Agent server not active (status: ${serverData.status || 'unknown'})`);
@@ -273,21 +270,15 @@ const EmbeddedAgentTesting = ({
       sessionStatsUnsubscribe.current = null;
     }
 
-    const sessionDoc = doc(db, 'agent_sessions', sessionId);
+    const dataAccess = getDataAccess();
 
-    const unsubscribe = onSnapshot(sessionDoc, (docSnapshot) => {
-      if (docSnapshot.exists()) {
-        const sessionData = docSnapshot.data();
-        const sessionStats = sessionData.session_stats || {};
-
-        // Update total tokens from Firestore
-        if (sessionStats.token_usage?.total_tokens) {
-          setTotalTokens(sessionStats.token_usage.total_tokens);
-          console.log('Token usage updated from Firestore:', sessionStats.token_usage.total_tokens);
-        }
+    // Use polling-based subscription to session stats
+    const unsubscribe = dataAccess.subscribeToTestingSessionStats(sessionId, (stats) => {
+      // Update total tokens from API polling
+      if (stats.total_tokens) {
+        setTotalTokens(stats.total_tokens);
+        console.log('Token usage updated from API:', stats.total_tokens);
       }
-    }, (error) => {
-      console.error('Error subscribing to session stats:', error);
     });
 
     sessionStatsUnsubscribe.current = unsubscribe;

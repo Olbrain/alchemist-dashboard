@@ -238,13 +238,36 @@ export const storeUserMessageToFirestore = async (userId, message, attachments =
 };
 
 export const getSessionMessagesFromFirestore = async (sessionId, organizationId, options = {}) => {
-  console.warn('getSessionMessagesFromFirestore: Not implemented in embed mode');
-  return [];
+  try {
+    const { getDataAccess } = require('../data/DataAccessFactory');
+    const dataAccess = getDataAccess();
+    const messages = await dataAccess.getTestingSessionMessages(sessionId, 100);
+    return messages;
+  } catch (error) {
+    console.error('Error getting session messages:', error);
+    return [];
+  }
 };
 
 export const subscribeToSessionMessages = (sessionId, organizationId, onMessagesUpdate, onError, options = {}) => {
-  console.warn('subscribeToSessionMessages: Not implemented in embed mode');
-  return () => {}; // Return empty unsubscribe
+  try {
+    const { getDataAccess } = require('../data/DataAccessFactory');
+    const dataAccess = getDataAccess();
+
+    const unsubscribe = dataAccess.subscribeToTestingSessionMessages(sessionId, (messages) => {
+      if (onMessagesUpdate) {
+        onMessagesUpdate(messages);
+      }
+    });
+
+    return unsubscribe;
+  } catch (error) {
+    console.error('Error subscribing to session messages:', error);
+    if (onError) {
+      onError(error);
+    }
+    return () => {}; // Return empty unsubscribe on error
+  }
 };
 
 // Additional stub functions exported by services/index.js

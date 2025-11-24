@@ -580,6 +580,120 @@ class ApiDataAccess {
   }
 
   // ============================================================================
+  // TESTING OPERATIONS
+  // ============================================================================
+
+  async getTestingSessions(agentId, organizationId, limit = 50) {
+    // Get sessions from analytics API (same endpoint as getAgentSessions)
+    // Note: Analytics API may not support mode filtering, so we filter client-side
+    const sessions = await this.getAgentSessions(agentId, limit, 0);
+
+    // Filter for testing mode sessions if mode field exists
+    // If mode field doesn't exist, return all sessions
+    const testingSessions = sessions.filter(session =>
+      !session.mode || session.mode === 'testing'
+    );
+
+    // Transform sessions to ensure they have required fields for UI
+    return testingSessions.map(session => ({
+      ...session,
+      id: session.session_id || session.id,
+      session_id: session.session_id || session.id,
+      // Map session_name to title for UI compatibility
+      title: session.session_name ||
+             session.title ||
+             (session.created_at ? `Session ${new Date(session.created_at).toLocaleString()}` : 'Untitled Session'),
+      description: session.session_description || session.description || '',
+      created_at: session.created_at,
+      last_message_at: session.last_message_at || session.updated_at || session.created_at,
+      status: session.status || 'active',
+      message_count: session.message_count || 0,
+      total_tokens: session.total_tokens || 0,
+      cost: session.cost || 0
+    }));
+  }
+
+  async getTestingSessionDetails(sessionId) {
+    // Reuse existing getSessionDetails method
+    return await this.getSessionDetails(sessionId);
+  }
+
+  async getTestingSessionMessages(sessionId, limit = 100) {
+    // Reuse existing getSessionMessages method
+    return await this.getSessionMessages(sessionId, limit);
+  }
+
+  // Polling-based subscription for testing session stats
+  subscribeToTestingSessionStats(sessionId, callback) {
+    const pollInterval = 3000; // 3 seconds
+    let timeoutId;
+    let lastData = null;
+
+    const poll = async () => {
+      try {
+        const sessionDetails = await this.getSessionDetails(sessionId);
+
+        if (sessionDetails) {
+          const stats = {
+            total_tokens: sessionDetails.total_tokens || 0,
+            prompt_tokens: sessionDetails.prompt_tokens || 0,
+            completion_tokens: sessionDetails.completion_tokens || 0,
+            message_count: sessionDetails.message_count || 0,
+            cost: sessionDetails.cost || 0
+          };
+
+          const currentDataStr = JSON.stringify(stats);
+          if (currentDataStr !== lastData) {
+            lastData = currentDataStr;
+            callback(stats);
+          }
+        }
+      } catch (error) {
+        console.error('Error polling session stats:', error);
+      }
+      timeoutId = setTimeout(poll, pollInterval);
+    };
+
+    poll();
+
+    return () => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    };
+  }
+
+  // Polling-based subscription for testing session messages
+  subscribeToTestingSessionMessages(sessionId, callback) {
+    const pollInterval = 2000; // 2 seconds for faster message updates
+    let timeoutId;
+    let lastData = null;
+
+    const poll = async () => {
+      try {
+        const messages = await this.getSessionMessages(sessionId, 100);
+
+        const currentDataStr = JSON.stringify(messages);
+        if (currentDataStr !== lastData) {
+          lastData = currentDataStr;
+          callback(messages);
+        }
+      } catch (error) {
+        console.error('Error polling session messages:', error);
+      }
+      timeoutId = setTimeout(poll, pollInterval);
+    };
+
+    poll();
+
+    return () => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    };
+  }
+
+  // ============================================================================
   // TILEDESK INTEGRATION OPERATIONS
   // ============================================================================
 

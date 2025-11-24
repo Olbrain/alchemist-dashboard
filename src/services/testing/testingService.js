@@ -4,19 +4,8 @@
  * Service for managing agent testing sessions, including creation,
  * session management, results tracking, and history
  */
-// import {
-//   collection,
-//   doc,
-//   getDoc,
-//   getDocs,
-//   query,
-//   where,
-//   orderBy,
-//   limit
-// } from 'firebase/firestore'; // REMOVED: Firebase/Firestore
-// import { db, Collections } from '../../utils/firebase'; // REMOVED: Firebase/Firestore
+import { getDataAccess } from '../data/DataAccessFactory';
 import { agentBuilderApi } from '../config/apiConfig';
-// import deploymentService from '../deployment/deploymentService';
 
 /**
  * Get all deployed agents for the current organization
@@ -53,21 +42,12 @@ export const getDeployedAgents = async (organizationId, ownerId) => {
  */
 export const getTestingSessions = async (agentId, organizationId, options = {}) => {
   try {
-    // REMOVED: Firestore query for testing sessions
-    // const { limitCount = 50 } = options;
-    // let q = query(
-    //   collection(db, 'agent_sessions'),
-    //   where('agent_id', '==', agentId),
-    //   where('organization_id', '==', organizationId),
-    //   where('mode', '==', 'testing'),
-    //   orderBy('last_message_at', 'desc'),
-    //   limit(limitCount)
-    // );
-    // const sessionsSnapshot = await getDocs(q);
-    // TODO: Replace with backend API call: GET /api/testing/sessions?agent_id={}&organization_id={}
+    const { limitCount = 50 } = options;
+    const dataAccess = getDataAccess();
 
-    console.warn('getTestingSessions: Firestore disabled, returning empty array');
-    return [];
+    const sessions = await dataAccess.getTestingSessions(agentId, organizationId, limitCount);
+
+    return sessions;
   } catch (error) {
     console.error('Error getting testing sessions:', error);
     throw error;
@@ -172,13 +152,14 @@ export const saveTestSessionResults = async (testSessionId, results) => {
  */
 export const getTestSession = async (testSessionId) => {
   try {
-    // REMOVED: Firestore read for test session
-    // const testSessionRef = doc(db, 'test_sessions', testSessionId);
-    // const testSessionDoc = await getDoc(testSessionRef);
-    // TODO: Replace with backend API call: GET /api/testing/sessions/{testSessionId}
+    const dataAccess = getDataAccess();
+    const session = await dataAccess.getTestingSessionDetails(testSessionId);
 
-    console.warn('getTestSession: Firestore disabled, returning null');
-    throw new Error('Test session not found');
+    if (!session) {
+      throw new Error('Test session not found');
+    }
+
+    return session;
   } catch (error) {
     console.error('Error getting test session:', error);
     throw error;
