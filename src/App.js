@@ -38,7 +38,7 @@ const RootComponent = () => {
 
 // Protected route component - simplified for embed mode
 const ProtectedRoute = ({ children }) => {
-  const { currentUser, loading } = useAuth();
+  const { currentUser } = useAuth();
 
   // For embed mode, host handles auth
   // Just render children if we have a user
@@ -47,7 +47,6 @@ const ProtectedRoute = ({ children }) => {
 
 function App() {
   const { loading: authLoading, currentUser } = useAuth();
-  const [appLoading, setAppLoading] = useState(true);
   const [themeMode, setThemeMode] = useState(() => {
     // Get theme from localStorage or default to light
     const savedTheme = localStorage.getItem('themeMode');
@@ -91,7 +90,6 @@ function App() {
   useEffect(() => {
     if (!authLoading) {
       console.log(`Auth loading complete. User authenticated: ${!!currentUser}`);
-      setAppLoading(false);
     }
   }, [authLoading, currentUser]);
 

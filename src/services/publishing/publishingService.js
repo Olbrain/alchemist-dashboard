@@ -12,19 +12,6 @@ import { getCurrentUser } from '../context';
 import { getServiceApiUrl } from '../config/apiConfig';
 
 /**
- * Calculate runtime in hours from timestamps
- */
-const calculateRuntimeHours = (startTime, endTime = null) => {
-  if (!startTime) return 0;
-
-  const start = startTime.seconds ? new Date(startTime.seconds * 1000) : new Date(startTime);
-  const end = endTime ? (endTime.seconds ? new Date(endTime.seconds * 1000) : new Date(endTime)) : new Date();
-
-  const diffMs = end - start;
-  return diffMs / (1000 * 60 * 60); // Convert to hours
-};
-
-/**
  * Format hours into human-readable string
  */
 export const formatRuntime = (hours) => {

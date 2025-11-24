@@ -94,7 +94,6 @@ const DashboardCore = ({
   width = '100%',
   height = '100%',
 }) => {
-  const [loading, setLoading] = React.useState(true);
   const theme = createAppTheme(themeMode);
 
   // Initialize dashboard with external configuration
@@ -120,9 +119,6 @@ const DashboardCore = ({
       if (apiUrls.agentBuilderAi) window.REACT_APP_AGENT_BUILDER_AI_SERVICE_URL = apiUrls.agentBuilderAi;
       if (apiUrls.agentDashboard) window.REACT_APP_AGENT_DASHBOARD_URL = apiUrls.agentDashboard;
     }
-
-    // Mark dashboard as initialized
-    setLoading(false);
   }, [apiUrl, config]);
 
   // Apply theme to body

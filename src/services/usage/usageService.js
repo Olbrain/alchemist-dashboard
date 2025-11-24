@@ -105,22 +105,13 @@ class UsageService {
    * TODO: Backend needs API calls endpoint
    */
   async getAgentApiCalls(agentId, options = {}) {
-    try {
-      // For now, return empty data structure
-      // Backend doesn't have dedicated API calls endpoint yet
-      return {
-        total_calls: 0,
-        calls_by_date: [],
-        monthly_breakdown: []
-      };
-    } catch (error) {
-      console.error('Error getting agent API calls:', error);
-      return {
-        total_calls: 0,
-        calls_by_date: [],
-        monthly_breakdown: []
-      };
-    }
+    // For now, return empty data structure
+    // Backend doesn't have dedicated API calls endpoint yet
+    return {
+      total_calls: 0,
+      calls_by_date: [],
+      monthly_breakdown: []
+    };
   }
 
   /**
@@ -128,19 +119,14 @@ class UsageService {
    * TODO: Backend needs project-level endpoints
    */
   async getProjectUsageByMonth(projectId, selectedMonth) {
-    try {
-      // Placeholder: Backend doesn't have project usage endpoint yet
-      return {
-        total_tokens: 0,
-        total_messages: 0,
-        total_sessions: 0,
-        total_cost: 0,
-        agents: []
-      };
-    } catch (error) {
-      console.error('Error getting project usage by month:', error);
-      throw error;
-    }
+    // Placeholder: Backend doesn't have project usage endpoint yet
+    return {
+      total_tokens: 0,
+      total_messages: 0,
+      total_sessions: 0,
+      total_cost: 0,
+      agents: []
+    };
   }
 
   /**
@@ -148,13 +134,8 @@ class UsageService {
    * TODO: Backend needs project agents usage endpoint
    */
   async getProjectAgentsUsageByMonth(projectId, selectedMonth) {
-    try {
-      // Placeholder: Backend doesn't have project agents usage endpoint yet
-      return [];
-    } catch (error) {
-      console.error('Error getting project agents usage by month:', error);
-      throw error;
-    }
+    // Placeholder: Backend doesn't have project agents usage endpoint yet
+    return [];
   }
 
   /**

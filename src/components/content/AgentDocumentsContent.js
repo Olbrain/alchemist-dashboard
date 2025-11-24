@@ -10,9 +10,6 @@ import {
   Box,
   Typography,
   Button,
-  Card,
-  CardContent,
-  Grid,
   Chip,
   IconButton,
   Dialog,
@@ -31,7 +28,6 @@ import {
   InputAdornment,
   Menu,
   Divider,
-  Avatar,
   alpha,
   useTheme,
   Table,
@@ -60,7 +56,7 @@ import {
   Add as AddIcon,
   Share as ShareIcon
 } from '@mui/icons-material';
-import { CardTitle, ListTitle, HelperText, MetricValue } from '../../utils/typography';
+import { CardTitle, HelperText, MetricValue } from '../../utils/typography';
 import { useAuth } from '../../utils/AuthContext';
 import documentService from '../../services/documents/documentService';
 import EmptyState from '../shared/EmptyState';

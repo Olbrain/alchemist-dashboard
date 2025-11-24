@@ -11,7 +11,6 @@
 // import { doc, getDoc, getDocs, deleteDoc, collection } from 'firebase/firestore'; // REMOVED: Firebase/Firestore
 import { getAuthToken } from '../auth/authService';
 import { AGENT_ENGINE_URL, TOOL_MANAGER_URL } from '../config/apiConfig';
-import { Collections } from '../../constants/collections';
 import { agentBuilderApi } from '../api/agentBuilderApiClient';
 import axios from 'axios';
 import { agentBuilderApi as apiConfigAxios } from '../config/apiConfig';

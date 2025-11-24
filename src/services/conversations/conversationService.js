@@ -7,11 +7,7 @@
  * NOTE: Many unused functions have been removed for embed mode.
  * Only actively used functions are included.
  */
-import { AGENT_ENGINE_URL, api, agentBuilderApi } from '../config/apiConfig';
 import { getDataAccess } from '../data/DataAccessFactory';
-import { logActivity } from '../activity/activityService';
-import { getCurrentUser } from '../context';
-import { AGENT_ACTIVITIES, RESOURCE_TYPES, ACTIVITY_SEVERITY } from '../../constants/activityTypes';
 
 /**
  * Test agent endpoint health/availability

@@ -6,21 +6,15 @@
  */
 
 import { getServiceApiUrl, agentBuilderApi } from '../config/apiConfig';
-import { db, Collections, DocumentFields } from '../../utils/firebase';
+import { db, Collections } from '../../utils/firebase';
 // import { collection, query, where, orderBy, getDocs, doc, getDoc, onSnapshot } from 'firebase/firestore'; // REMOVED: Firebase/Firestore
 import { getDataAccess } from '../data/DataAccessFactory';
 import { logActivity } from '../activity/activityService';
 import { AGENT_ACTIVITIES, RESOURCE_TYPES, ACTIVITY_SEVERITY } from '../../constants/activityTypes';
 
 // FIRESTORE STUBS - These functions are stubbed because Firestore is disabled
-const collection = (...args) => { console.warn('Firestore disabled: collection() called'); return null; };
 const doc = (...args) => { console.warn('Firestore disabled: doc() called'); return null; };
 const getDoc = async (...args) => { console.warn('Firestore disabled: getDoc() called'); return { exists: () => false, data: () => ({}) }; };
-const getDocs = async (...args) => { console.warn('Firestore disabled: getDocs() called'); return { docs: [], size: 0, forEach: () => {} }; };
-const query = (...args) => { console.warn('Firestore disabled: query() called'); return null; };
-const where = (...args) => { console.warn('Firestore disabled: where() called'); return null; };
-const orderBy = (...args) => { console.warn('Firestore disabled: orderBy() called'); return null; };
-const onSnapshot = (...args) => { console.warn('Firestore disabled: onSnapshot() called'); const callback = args.find(a => typeof a === 'function'); if (callback) setTimeout(() => callback({ docs: [], size: 0, forEach: () => {} }), 0); return () => {}; };
 
 
 class DeploymentService {
@@ -543,7 +537,7 @@ class DeploymentService {
       try {
         // First try to find deployment in cache to get agent_id
         if (!agentId) {
-          for (const [cachedAgentId, deployments] of this.deploymentsCache.entries()) {
+          for (const [, deployments] of this.deploymentsCache.entries()) {
             const found = deployments.find(d => d.deployment_id === deploymentId);
             if (found) {
               agentId = found.agent_id;
@@ -608,7 +602,7 @@ class DeploymentService {
     try {
       // First, try to find in cache to get agent_id
       let agentId = null;
-      for (const [cachedAgentId, deployments] of this.deploymentsCache.entries()) {
+      for (const [, deployments] of this.deploymentsCache.entries()) {
         const found = deployments.find(d => d.deployment_id === deploymentId);
         if (found) {
           agentId = found.agent_id;

@@ -141,20 +141,6 @@ const AgentDeploymentManager = ({
     buttonDisabled: loading || isCurrentlyDeploying || disabled || !onDeployAgent
   });
 
-  const getStatusColor = (status) => {
-    switch (status?.toLowerCase()) {
-      case 'completed':
-      case 'deployed':
-        return 'success';
-      case 'pending':
-      case 'deploying':
-      case 'building':
-        return 'warning';
-      default:
-        return 'default';
-    }
-  };
-
   // Get status info with icon and color (matches MCP pattern)
   const getStatusInfo = (status) => {
     switch (status?.toLowerCase()) {
