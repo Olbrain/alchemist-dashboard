@@ -1,0 +1,96 @@
+name: Publish to npm
+
+on:
+  push:
+    tags:
+      - 'v*'  # Trigger on version tags like v0.1.7, v1.0.0, etc.
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write  # Required for creating GitHub releases
+      id-token: write  # Required for npm provenance
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for changelog generation
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Extract version from tag
+        id: extract_version
+        run: |
+          # Extract version from tag (e.g., v0.1.7 -> 0.1.7)
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Publishing version: $VERSION"
+
+      - name: Verify package.json version matches tag
+        run: |
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION=${{ steps.extract_version.outputs.version }}
+          if [ "$PACKAGE_VERSION" != "$TAG_VERSION" ]; then
+            echo "Error: package.json version ($PACKAGE_VERSION) doesn't match tag version ($TAG_VERSION)"
+            exit 1
+          fi
+          echo "Version verified: $PACKAGE_VERSION"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run build
+        run: npm run build:prod
+        env:
+          NODE_ENV: production
+
+      - name: Run tests (if available)
+        run: npm test -- --passWithNoTests --watchAll=false
+        continue-on-error: true
+
+      - name: Publish to npm
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get commits since last tag
+          PREV_TAG=$(git describe --abbrev=0 --tags HEAD^ 2>/dev/null || echo "")
+          if [ -z "$PREV_TAG" ]; then
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)" --no-merges)
+          else
+            CHANGELOG=$(git log $PREV_TAG..HEAD --pretty=format:"- %s (%h)" --no-merges)
+          fi
+
+          # Save to file for GitHub Release
+          echo "# What's Changed" > CHANGELOG.md
+          echo "" >> CHANGELOG.md
+          echo "$CHANGELOG" >> CHANGELOG.md
+          echo "" >> CHANGELOG.md
+          echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/$PREV_TAG...v${{ steps.extract_version.outputs.version }}" >> CHANGELOG.md
+
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ steps.extract_version.outputs.version }}
+          release_name: Release v${{ steps.extract_version.outputs.version }}
+          body_path: CHANGELOG.md
+          draft: false
+          prerelease: false
+
+      - name: Notify success
+        run: |
+          echo "✅ Successfully published @olbrain/alchemist-dashboard@${{ steps.extract_version.outputs.version }} to npm"
+          echo "📦 Package: https://www.npmjs.com/package/@olbrain/alchemist-dashboard/v/${{ steps.extract_version.outputs.version }}"
+          echo "🎉 GitHub Release: https://github.com/${{ github.repository }}/releases/tag/v${{ steps.extract_version.outputs.version }}"
