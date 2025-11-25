@@ -434,11 +434,21 @@ const TiledeskStatus = ({ agentId, bot, onError, onNotification, onBotDisconnect
                   <CardContent>
                     <Box display="flex" alignItems="center" justifyContent="space-between">
                       <HelperText>
-                        Webhook Status
+                        {botHealth.integration_type === 'rest_fallback'
+                          ? 'Integration Type'
+                          : 'Webhook Status'}
                       </HelperText>
                       <Chip
-                        label={botHealth.webhook_status || 'Unknown'}
-                        color={botHealth.webhook_status === 'active' ? 'success' : 'warning'}
+                        label={
+                          botHealth.integration_type === 'rest_fallback'
+                            ? 'REST API Fallback'
+                            : (botHealth.webhook_status || 'Unknown')
+                        }
+                        color={
+                          botHealth.integration_type === 'rest_fallback'
+                            ? 'info'
+                            : (botHealth.webhook_status === 'active' ? 'success' : 'warning')
+                        }
                         icon={<WebhookIcon />}
                       />
                     </Box>

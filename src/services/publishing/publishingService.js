@@ -131,13 +131,15 @@ export const publishAgent = async (agentId) => {
     // Call agent-builder-ai-service backend API to publish agent
     // Backend handles all Firestore updates (agent document + audit trail)
     const agentBuilderUrl = getServiceApiUrl('agent-builder-ai');
-    const idToken = await currentUser.getIdToken();
+
+    // Use organization API key for embed mode authentication
+    const apiKey = window.REACT_APP_ORGANIZATION_API_KEY || process.env.REACT_APP_ORGANIZATION_API_KEY;
 
     const response = await fetch(`${agentBuilderUrl}/api/agents/${agentId}/publish`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${idToken}`
+        'Authorization': `ApiKey ${apiKey}`
       }
     });
 
@@ -198,13 +200,15 @@ export const unpublishAgent = async (agentId) => {
     // Backend handles all Firestore updates (agent document + audit trail)
     // Backend also calculates session runtime from last publish action
     const agentBuilderUrl = getServiceApiUrl('agent-builder-ai');
-    const idToken = await currentUser.getIdToken();
+
+    // Use organization API key for embed mode authentication
+    const apiKey = window.REACT_APP_ORGANIZATION_API_KEY || process.env.REACT_APP_ORGANIZATION_API_KEY;
 
     const response = await fetch(`${agentBuilderUrl}/api/agents/${agentId}/unpublish`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${idToken}`
+        'Authorization': `ApiKey ${apiKey}`
       }
     });
 
